@@ -1,762 +1,227 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { io, type Socket } from "socket.io-client";
-import QRCode from "qrcode";
-import type {
-  ActionResponse,
-  CardPayload,
-  ClientToServerEvents,
-  DeckSize,
-  RoomSnapshot,
-  RoundPreparePayload,
-  RoundResultPayload,
-  ServerToClientEvents,
-  SessionPayload,
-} from "../shared/types";
-import { DECK_SIZE_OPTIONS } from "../shared/types";
-import { SYMBOLS } from "./symbols";
-import { getSymbolVariation } from "./cardVariation";
+import { useEffect, useRef, useState } from 'react';
+import { puzzles } from './lib/catalog';
+import { canPlay } from './data/access';
+import { Board, initialMatches, Preview, type Match } from './components/Board';
+import { Icon, Logo } from './components/Icon';
+import { Modal } from './components/Modal';
+import { applyMove, checkBoard, decode, initialBoard, solutionMoves, type BoardState, type Difficulty, type Move, type Puzzle, type PuzzlePack } from './lib/engine';
+import { readLanguage, translations, type Copy, type Language } from './lib/i18n';
+import { hasParentPin, isParentPin, saveParentPin, verifyParentPin } from './lib/parent-pin';
+import { PROGRESS_KEY, readProgress, saveProgress, type Progress } from './lib/storage';
 
-type Session = Pick<SessionPayload, "roomCode" | "playerId" | "playerToken">;
-type Profile = { identityToken: string; name: string; avatarId: number };
-type RecentGroup = { groupId: string; players: Array<{ name: string; avatarId: number }>; updatedAt: number };
-type EntryTarget = { kind: "group"; value: string } | { kind: "code"; value: string };
-
-const DECK_SIZE_LABELS: Record<DeckSize, string> = {
-  18: "קצר",
-  36: "רגיל",
-  57: "מלא",
-};
-
-const SESSION_KEY = "dobble-live-session";
-const PROFILE_KEY = "dobble-live-profile";
-const RECENT_GROUP_KEY = "dobble-live-recent-group";
-const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const AVATAR_CHOICES = [2, 5, 9, 13, 16, 22, 28, 31, 33, 40, 41, 44, 45, 52, 55, 56] as const;
-const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io({
-  autoConnect: false,
-  transports: ["websocket", "polling"],
-  reconnection: true,
-});
-
-function randomToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(24));
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-function createProfile(): Profile {
-  const avatarId = AVATAR_CHOICES[Math.floor(Math.random() * AVATAR_CHOICES.length)];
-  return { identityToken: randomToken(), name: SYMBOLS[avatarId].label, avatarId };
-}
-
-function readProfile(): Profile {
-  try {
-    const stored = JSON.parse(localStorage.getItem(PROFILE_KEY) ?? "null") as Partial<Profile> | null;
-    if (
-      stored
-      && typeof stored.identityToken === "string"
-      && /^[A-Za-z0-9_-]{16,128}$/.test(stored.identityToken)
-      && typeof stored.name === "string"
-      && stored.name.trim().length > 0
-      && Number.isInteger(stored.avatarId)
-      && Number(stored.avatarId) >= 0
-      && Number(stored.avatarId) < SYMBOLS.length
-    ) {
-      return { identityToken: stored.identityToken, name: stored.name.trim(), avatarId: Number(stored.avatarId) };
-    }
-  } catch {
-    // A fresh local identity is safer than blocking the entry flow on malformed storage.
-  }
-  const profile = createProfile();
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-  return profile;
-}
-
-function readSession(): Session | null {
-  try {
-    const value = localStorage.getItem(SESSION_KEY);
-    return value ? (JSON.parse(value) as Session) : null;
-  } catch {
-    return null;
-  }
-}
-
-function readRecentGroup(): RecentGroup | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(RECENT_GROUP_KEY) ?? "null") as RecentGroup | null;
-    return value && /^[A-Za-z0-9_-]{8,32}$/.test(value.groupId) && Array.isArray(value.players) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function readEntryTarget(): EntryTarget | null {
-  const groupMatch = window.location.pathname.match(/^\/r\/([A-Za-z0-9_-]{8,32})\/?$/);
-  if (groupMatch) return { kind: "group", value: groupMatch[1] };
-  const codeMatch = window.location.pathname.match(/^\/(?:j\/)?([A-HJ-NP-Z2-9]{4})\/?$/i);
-  return codeMatch ? { kind: "code", value: codeMatch[1].toUpperCase() } : null;
-}
-
-function identityInput(profile: Profile) {
-  return { name: profile.name, avatarId: profile.avatarId, identityToken: profile.identityToken };
-}
-
-function avatarSymbol(avatarId: number) {
-  return SYMBOLS[avatarId] ?? SYMBOLS[0];
-}
+type Message = 'correct'|'incorrect'|'invalid'|'noMoves'|'hintOne'|'hintTwo'|'hintReset'|'revealed'|'clear'|'solutionUnavailable';
+type PaymentMessage = 'unlockChecking'|'unlockSuccess'|'unlockFailed'|'checkoutCancelled';
+type ModalName = 'rules'|'progress'|'pinSetup'|'pinVerify'|'parentChoice'|'parentSettings'|'restore'|null;
+type PinError = 'pinFormat'|'pinMismatch'|'pinIncorrect'|'pinStorageError'|null;
+type RestoreError = 'restoreInvalid'|'restoreUnavailable'|null;
+type ParentIntent = 'unlock'|'settings';
+const readPuzzle = () => puzzles.find(p=>`#/puzzle/${p.id}`===window.location.hash)??null;
+const number = (p:Puzzle) => String(puzzles.indexOf(p)+1).padStart(2,'0');
+const PACKS: PuzzlePack[] = ['start','signs','champion'];
+function DifficultyBadge({difficulty,t}:{difficulty:Difficulty;t:Copy}) {return <span className={`difficulty ${difficulty}`}><span className="difficulty-dots" aria-hidden="true">{[0,1,2].map(i=><i key={i} className={i<({easy:1,medium:2,hard:3}[difficulty])?'lit':''}/>)}</span>{t[difficulty]}</span>;}
 
 export function App() {
-  const [profile, setProfile] = useState<Profile>(() => readProfile());
-  const profileRef = useRef(profile);
-  const [editingProfile, setEditingProfile] = useState(false);
-  const [joinCode, setJoinCode] = useState(() => readEntryTarget()?.kind === "code" ? readEntryTarget()!.value : "");
-  const [recentGroup, setRecentGroup] = useState<RecentGroup | null>(() => readRecentGroup());
-  const [session, setSession] = useState<Session | null>(() => readSession());
-  const [room, setRoom] = useState<RoomSnapshot | null>(null);
-  const [round, setRound] = useState<RoundPreparePayload | null>(null);
-  const [result, setResult] = useState<RoundResultPayload | null>(null);
-  const [lockUntil, setLockUntil] = useState(0);
-  const [wrongSymbol, setWrongSymbol] = useState<number | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [restoring, setRestoring] = useState(Boolean(session || readEntryTarget()));
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const [copyState, setCopyState] = useState<"code" | "link" | null>(null);
-  const [clockOffset, setClockOffset] = useState(0);
-  const [now, setNow] = useState(Date.now());
-  const wrongTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    profileRef.current = profile;
-  }, [profile]);
-
-  const saveSession = useCallback((payload: SessionPayload) => {
-    const next = {
-      roomCode: payload.roomCode,
-      playerId: payload.playerId,
-      playerToken: payload.playerToken,
-    };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(next));
-    setSession(next);
-    setRoom(payload.room);
-    if (payload.room.groupId) {
-      const path = `/r/${payload.room.groupId}`;
-      if (window.location.pathname !== path) window.history.replaceState(null, "", path);
-    }
-  }, []);
-
-  const clearSession = useCallback((goHome = false) => {
-    localStorage.removeItem(SESSION_KEY);
-    setSession(null);
-    setRoom(null);
-    setRound(null);
-    setResult(null);
-    setLockUntil(0);
-    if (goHome && window.location.pathname !== "/") window.history.replaceState(null, "", "/");
-  }, []);
-
-  const completeEntry = useCallback((response: ActionResponse<SessionPayload>) => {
-    setBusy(false);
-    setRestoring(false);
-    if (response.ok) {
-      setMessage("");
-      saveSession(response);
-      const currentProfile = profileRef.current;
-      socket.emit("player:update", { name: currentProfile.name, avatarId: currentProfile.avatarId }, () => undefined);
-    } else {
-      clearSession(false);
-      setMessage(response.message);
-    }
-  }, [clearSession, saveSession]);
-
-  const syncClock = useCallback(async () => {
-    const samples: Array<{ rtt: number; offset: number }> = [];
-    for (let index = 0; index < 3; index += 1) {
-      const sentAt = Date.now();
-      const serverNow = await new Promise<number>((resolve) => socket.emit("time:ping", sentAt, resolve));
-      const receivedAt = Date.now();
-      samples.push({ rtt: receivedAt - sentAt, offset: serverNow - (sentAt + receivedAt) / 2 });
-    }
-    samples.sort((a, b) => a.rtt - b.rtt);
-    setClockOffset(samples[0]?.offset ?? 0);
-  }, []);
-
-  useEffect(() => {
-    const onConnect = () => {
-      setConnected(true);
-      setMessage("");
-      void syncClock();
-      const target = readEntryTarget();
-      const currentProfile = profileRef.current;
-      if (target?.kind === "group") {
-        socket.emit("room:join-group", { ...identityInput(currentProfile), groupId: target.value }, completeEntry);
-        return;
-      }
-      if (target?.kind === "code") {
-        socket.emit("room:join", { ...identityInput(currentProfile), code: target.value }, completeEntry);
-        return;
-      }
-      const stored = readSession();
-      if (stored) {
-        socket.emit("room:resume", { code: stored.roomCode, playerToken: stored.playerToken }, (response) => {
-          if (!response.ok && response.code === "session_expired") {
-            clearSession(false);
-            setRestoring(false);
-            setMessage("");
-            return;
+  const [language,setLanguage]=useState<Language>(readLanguage);
+  const [progress,setProgress]=useState<Progress>(readProgress);
+  const [puzzle,setPuzzle]=useState<Puzzle|null>(readPuzzle);
+  const [filter,setFilter]=useState<Difficulty|'all'>('all');
+  const [modal,setModal]=useState<ModalName>(null);
+  const [storageError,setStorageError]=useState(false);
+  const [checkoutBusy,setCheckoutBusy]=useState(false);
+  const [checkoutError,setCheckoutError]=useState(false);
+  const [paymentMessage,setPaymentMessage]=useState<PaymentMessage|null>(null);
+  const [parentIntent,setParentIntent]=useState<ParentIntent>('unlock');
+  const [pin,setPin]=useState('');
+  const [pinConfirm,setPinConfirm]=useState('');
+  const [pinBusy,setPinBusy]=useState(false);
+  const [pinError,setPinError]=useState<PinError>(null);
+  const [restoreCode,setRestoreCode]=useState('');
+  const [restoreBusy,setRestoreBusy]=useState(false);
+  const [restoreError,setRestoreError]=useState<RestoreError>(null);
+  const t=translations[language];
+  const returnPage=window.location.pathname.replace(/\/$/,'') as ''|'/success'|'/cancel';
+  const paymentPage=returnPage==='/success'||returnPage==='/cancel';
+  useEffect(()=>{document.documentElement.lang=language;document.documentElement.dir=language==='he'?'rtl':'ltr';document.title=`${returnPage==='/success'?t.paymentSuccessTitle:returnPage==='/cancel'?t.paymentCancelTitle:t.appName}${paymentPage?` — ${t.appName}`:''}`;try{localStorage.setItem('matchstick-language',language);}catch{/* Keep the selected language for this session. */}},[language,t,paymentPage,returnPage]);
+  useEffect(()=>{setStorageError(!saveProgress(progress));},[progress]);
+  useEffect(()=>{
+    const url=new URL(window.location.href),code=url.searchParams.get('unlock'),cancelled=returnPage==='/cancel'||url.searchParams.get('checkout')==='cancelled';
+    const clean=()=>{url.searchParams.delete('unlock');url.searchParams.delete('checkout');window.history.replaceState(null,'',`${url.pathname}${url.search}${url.hash}`);};
+    if(!code){if(cancelled){setPaymentMessage('checkoutCancelled');clean();}else if(returnPage==='/success')setPaymentMessage('unlockFailed');return;}
+    let active=true;setPaymentMessage('unlockChecking');
+    void (async()=>{
+      for(let attempt=0;attempt<6&&active;attempt++){
+        try{
+          const response=await fetch(`/api/unlock/${encodeURIComponent(code)}`,{cache:'no-store'});
+          const result=await response.json();
+          if(response.ok&&result.ok===true&&result.product==='full_version'){
+            setProgress(previous=>({...previous,unlocked:true,unlockCode:code}));setPaymentMessage('unlockSuccess');clean();return;
           }
-          completeEntry(response);
-        });
-      } else {
-        setRestoring(false);
+          if(response.status!==404)break;
+        }catch{/* A short retry also covers a webhook arriving just after the redirect. */}
+        await new Promise(resolve=>setTimeout(resolve,1500));
       }
-    };
-    const onDisconnect = () => setConnected(false);
-    const onRoom = (nextRoom: RoomSnapshot) => setRoom(nextRoom);
-    const onRound = (nextRound: RoundPreparePayload) => {
-      setRound(nextRound);
-      setResult(null);
-      setLockUntil(0);
-      setWrongSymbol(null);
-    };
-    const onResult = (nextResult: RoundResultPayload) => {
-      setResult(nextResult);
-      setLockUntil(0);
-    };
-    const onLocked = ({ lockUntil: until }: { roundId: string; lockUntil: number }) => setLockUntil(until);
-    const onNotice = ({ message: notice }: { message: string }) => setMessage(notice);
-
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on("room:state", onRoom);
-    socket.on("round:prepare", onRound);
-    socket.on("round:result", onResult);
-    socket.on("player:locked", onLocked);
-    socket.on("server:notice", onNotice);
-    socket.connect();
-    return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
-      socket.off("room:state", onRoom);
-      socket.off("round:prepare", onRound);
-      socket.off("round:result", onResult);
-      socket.off("player:locked", onLocked);
-      socket.off("server:notice", onNotice);
-      socket.disconnect();
-    };
-  }, [clearSession, completeEntry, syncClock]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 100);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => () => {
-    if (wrongTimer.current) clearTimeout(wrongTimer.current);
-  }, []);
-
-  useEffect(() => {
-    if (!room?.groupId || room.players.length < 2) return;
-    const recent: RecentGroup = {
-      groupId: room.groupId,
-      players: room.players.slice(0, 4).map(({ name, avatarId }) => ({ name, avatarId })),
-      updatedAt: Date.now(),
-    };
-    localStorage.setItem(RECENT_GROUP_KEY, JSON.stringify(recent));
-    setRecentGroup(recent);
-  }, [room]);
-
-  const enter = (kind: "quick" | "create" | "code" | "group", value?: string) => {
-    if (!connected || busy) return;
-    setBusy(true);
-    setRound(null);
-    setResult(null);
-    setMessage("");
-    const identity = identityInput(profile);
-    if (kind === "quick") socket.emit("room:matchmake", identity, completeEntry);
-    if (kind === "create") socket.emit("room:create", identity, completeEntry);
-    if (kind === "code") socket.emit("room:join", { ...identity, code: value ?? "" }, completeEntry);
-    if (kind === "group") socket.emit("room:join-group", { ...identity, groupId: value ?? "" }, completeEntry);
+      if(active){setPaymentMessage('unlockFailed');clean();}
+    })();
+    return()=>{active=false;};
+  },[returnPage]);
+  useEffect(()=>{const changed=()=>{setPuzzle(readPuzzle());setModal(null);window.scrollTo({top:0,behavior:'instant'});};window.addEventListener('hashchange',changed);const stored=(e:StorageEvent)=>{if(e.key===PROGRESS_KEY||e.key===null)setProgress(readProgress());};window.addEventListener('storage',stored);return ()=>{window.removeEventListener('hashchange',changed);window.removeEventListener('storage',stored);};},[]);
+  const open=(p:Puzzle)=>{window.location.hash=`/puzzle/${p.id}`;};
+  const home=()=>{if(paymentPage)window.location.assign('/#/');else window.location.hash='/';};
+  const addProgress=(kind:'solvedIds'|'hintedIds',id:string)=>setProgress(previous=>previous[kind].includes(id)?previous:{...previous,[kind]:[...previous[kind],id]});
+  const clearParentForm=()=>{setPin('');setPinConfirm('');setPinError(null);setCheckoutError(false);};
+  const openParentGate=(intent:ParentIntent)=>{clearParentForm();setParentIntent(intent);setModal(hasParentPin()?'pinVerify':'pinSetup');};
+  const parentDestination=()=>setModal(parentIntent==='unlock'?'parentChoice':'parentSettings');
+  const submitPinSetup=async()=>{
+    if(!isParentPin(pin)){setPinError('pinFormat');return;}
+    if(pin!==pinConfirm){setPinError('pinMismatch');return;}
+    setPinBusy(true);const saved=await saveParentPin(pin);setPinBusy(false);
+    if(!saved){setPinError('pinStorageError');return;}clearParentForm();parentDestination();
   };
-
-  const startGame = (restart = false) => {
-    setBusy(true);
-    setMessage("");
-    socket.emit(restart ? "game:restart" : "game:start", (response) => {
-      setBusy(false);
-      if (!response.ok) setMessage(response.message);
-    });
+  const submitPinVerify=async()=>{
+    if(!isParentPin(pin)){setPinError('pinFormat');return;}
+    setPinBusy(true);const valid=await verifyParentPin(pin);setPinBusy(false);
+    if(!valid){setPinError('pinIncorrect');return;}clearParentForm();parentDestination();
   };
-
-  const updateDeckSize = (deckSize: DeckSize) => {
-    setMessage("");
-    socket.emit("room:settings", { deckSize }, (response) => {
-      if (!response.ok) setMessage(response.message);
-    });
+  const startCheckout=async()=>{
+    setCheckoutBusy(true);setCheckoutError(false);
+    try{
+      const response=await fetch('/api/checkout/session',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      const result=await response.json();
+      if(!response.ok||typeof result.url!=='string')throw Error();
+      const target=new URL(result.url,window.location.href);
+      if(target.origin!==window.location.origin&&target.hostname!=='checkout.stripe.com')throw Error();
+      window.location.assign(target.href);
+    }catch{setCheckoutBusy(false);setCheckoutError(true);}
   };
-
-  const leaveRoom = () => {
-    socket.emit("room:leave", () => undefined);
-    clearSession(true);
+  const openRestore=()=>{setRestoreCode('');setRestoreError(null);setModal('restore');};
+  const restoreAccess=async()=>{
+    const code=restoreCode.trim();if(!code||code.length>512){setRestoreError('restoreInvalid');return;}
+    setRestoreBusy(true);setRestoreError(null);
+    try{
+      const response=await fetch(`/api/unlock/${encodeURIComponent(code)}`,{cache:'no-store'}),result=await response.json();
+      if(!response.ok||result.ok!==true||result.product!=='full_version'){setRestoreError('restoreInvalid');return;}
+      setProgress(previous=>({...previous,unlocked:true,unlockCode:code}));setPaymentMessage('unlockSuccess');setModal(null);
+    }catch{setRestoreError('restoreUnavailable');}finally{setRestoreBusy(false);}
   };
-
-  const updateProfile = (nextProfile: Profile) => {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(nextProfile));
-    profileRef.current = nextProfile;
-    setProfile(nextProfile);
-    setEditingProfile(false);
-    if (session) {
-      socket.emit("player:update", { name: nextProfile.name, avatarId: nextProfile.avatarId }, (response) => {
-        if (!response.ok) setMessage(response.message);
-      });
-    }
-  };
-
-  const pickSymbol = (symbolId: number) => {
-    const serverNow = Date.now() + clockOffset;
-    if (!round || result || serverNow < round.startsAt || serverNow < lockUntil || !connected) return;
-    socket.emit("round:pick", { roundId: round.id, symbolId }, (response) => {
-      if (!response.ok) {
-        if (response.code !== "round_closed") setMessage(response.message);
-        return;
-      }
-      if (response.result === "wrong") {
-        setWrongSymbol(symbolId);
-        if (response.lockUntil) setLockUntil(response.lockUntil);
-        if (wrongTimer.current) clearTimeout(wrongTimer.current);
-        wrongTimer.current = setTimeout(() => setWrongSymbol(null), 520);
-      }
-    });
-  };
-
-  const inviteUrl = room
-    ? `${window.location.origin}${room.groupId ? `/r/${room.groupId}` : `/${room.code.toLowerCase()}`}`
-    : "";
-
-  const copyCode = async () => {
-    if (!room) return;
-    try {
-      await navigator.clipboard.writeText(room.code);
-      setCopyState("code");
-      setTimeout(() => setCopyState(null), 1_600);
-    } catch {
-      setMessage(`קוד החדר: ${room.code}`);
-    }
-  };
-
-  const shareInvite = async () => {
-    if (!room) return;
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: "Dobble Live", text: "מצטרפים למשחק Dobble?", url: inviteUrl });
-      } else {
-        await navigator.clipboard.writeText(inviteUrl);
-        setCopyState("link");
-        setTimeout(() => setCopyState(null), 1_600);
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setMessage("לא הצלחנו לפתוח את השיתוף. אפשר להשתמש בקוד החדר.");
-    }
-  };
-
-  const editor = editingProfile
-    ? <ProfileEditor profile={profile} onSave={updateProfile} onClose={() => setEditingProfile(false)} />
-    : null;
-
-  if (restoring) {
-    return <><LoadingScreen connected={connected} />{editor}</>;
-  }
-
-  if (!session || !room) {
-    return (
-      <>
-        <WelcomeScreen
-          profile={profile}
-          connected={connected}
-          busy={busy}
-          message={message}
-          joinCode={joinCode}
-          recentGroup={recentGroup}
-          onEditProfile={() => setEditingProfile(true)}
-          onJoinCodeChange={setJoinCode}
-          onQuickPlay={() => enter("quick")}
-          onCreate={() => enter("create")}
-          onJoin={() => enter("code", joinCode)}
-          onRecent={() => recentGroup && enter("group", recentGroup.groupId)}
-        />
-        {editor}
-      </>
-    );
-  }
-
-  const serverNow = now + clockOffset;
-  const me = room.players.find((player) => player.id === session.playerId);
-  return (
-    <>
-      <main className="app-shell">
-        <TopBar
-          room={room}
-          profile={profile}
-          connected={connected}
-          copied={copyState === "code"}
-          onCopy={copyCode}
-          onEditProfile={() => setEditingProfile(true)}
-          onLeave={leaveRoom}
-        />
-        {message && <Toast message={message} onClose={() => setMessage("")} />}
-        {!connected && <div className="connection-banner">מנסים להתחבר מחדש…</div>}
-        {room.phase === "lobby" && (
-          <Lobby
-            room={room}
-            playerId={session.playerId}
-            busy={busy}
-            copiedCode={copyState === "code"}
-            copiedLink={copyState === "link"}
-            inviteUrl={inviteUrl}
-            serverNow={serverNow}
-            onCopy={copyCode}
-            onInvite={shareInvite}
-            onDeckSizeChange={updateDeckSize}
-            onStart={() => startGame(false)}
-          />
-        )}
-        {room.phase === "playing" && round && (
-          <GameBoard
-            room={room}
-            playerId={session.playerId}
-            round={round}
-            result={result}
-            serverNow={serverNow}
-            lockUntil={lockUntil}
-            wrongSymbol={wrongSymbol}
-            connected={connected}
-            onPick={pickSymbol}
-          />
-        )}
-        {room.phase === "playing" && !round && <WaitingForNextRound room={room} inviteUrl={inviteUrl} onInvite={shareInvite} />}
-        {room.phase === "results" && (
-          <Results
-            room={room}
-            playerId={session.playerId}
-            busy={busy}
-            onDeckSizeChange={updateDeckSize}
-            onRestart={() => startGame(true)}
-          />
-        )}
-        <span className="sr-only" aria-live="polite">{me ? `הניקוד שלך הוא ${me.score}` : ""}</span>
-      </main>
-      {editor}
-    </>
-  );
-}
-
-function WelcomeScreen(props: {
-  profile: Profile;
-  connected: boolean;
-  busy: boolean;
-  message: string;
-  joinCode: string;
-  recentGroup: RecentGroup | null;
-  onEditProfile: () => void;
-  onJoinCodeChange: (value: string) => void;
-  onQuickPlay: () => void;
-  onCreate: () => void;
-  onJoin: () => void;
-  onRecent: () => void;
-}) {
-  const sanitizeCode = (value: string) => value
-    .toUpperCase()
-    .split("")
-    .filter((character) => ROOM_ALPHABET.includes(character))
-    .join("")
-    .slice(0, 4);
-  const recentNames = props.recentGroup?.players.map((player) => player.name).join(", ");
-
-  return (
-    <main className="welcome-page">
-      <IdentityChip profile={props.profile} onClick={props.onEditProfile} className="welcome-identity" />
-      <div className="welcome-orbit orbit-one">⭐</div>
-      <div className="welcome-orbit orbit-two">🍀</div>
-      <section className="welcome-card home-card">
-        <div className="brand-mark" aria-hidden="true"><span>⚡</span><span>🍉</span><span>🦊</span></div>
-        <p className="eyebrow">רואים מהר · לוחצים ראשונים</p>
-        <h1>Dobble <em>Live</em></h1>
-        <p className="welcome-copy">נכנסים בשנייה. את השם והסמל תמיד אפשר לשנות.</p>
-
-        <div className="home-actions" aria-label="אפשרויות משחק">
-          <button className="home-action quick-action" onClick={props.onQuickPlay} disabled={!props.connected || props.busy}>
-            <span className="action-icon">⚡</span>
-            <span><strong>משחק מהיר</strong><small>נמצא לכם שחקנים ונתחיל</small></span>
-            <b aria-hidden="true">←</b>
-          </button>
-          <button className="home-action" onClick={props.onCreate} disabled={!props.connected || props.busy}>
-            <span className="action-icon mint">＋</span>
-            <span><strong>חדר לחברים</strong><small>QR, קישור וקוד להזמנה</small></span>
-            <b aria-hidden="true">←</b>
-          </button>
-          <form className="join-action" onSubmit={(event) => { event.preventDefault(); props.onJoin(); }}>
-            <label htmlFor="room-code">יש לי קוד</label>
-            <div>
-              <input
-                id="room-code"
-                className="code-input"
-                dir="ltr"
-                inputMode="text"
-                value={props.joinCode}
-                onChange={(event) => props.onJoinCodeChange(sanitizeCode(event.target.value))}
-                maxLength={4}
-                autoComplete="off"
-                placeholder="XK4T"
-                aria-describedby="code-help"
-              />
-              <button aria-label="הצטרפות עם הקוד" disabled={!props.connected || props.busy || props.joinCode.length !== 4}>כניסה</button>
-            </div>
-            <small id="code-help">4 תווים · בלי O, 0, I או 1</small>
-          </form>
-        </div>
-
-        {props.recentGroup && (
-          <button className="recent-group" onClick={props.onRecent} disabled={!props.connected || props.busy}>
-            <span className="recent-avatars">
-              {props.recentGroup.players.slice(0, 3).map((player, index) => <i key={`${player.name}-${index}`}>{avatarSymbol(player.avatarId).glyph}</i>)}
-            </span>
-            <span><small>הקבוצה האחרונה</small><strong>שוב עם {recentNames}</strong></span>
-            <b aria-hidden="true">←</b>
-          </button>
-        )}
-        {props.message && <p className="form-error" role="alert">{props.message}</p>}
-        <p className="microcopy"><span className={props.connected ? "status-dot online" : "status-dot"} /> {props.busy ? "מסדרים את המשחק…" : props.connected ? "מוכנים למשחק בזמן אמת" : "מתחברים לשרת…"}</p>
+  const visible=puzzles.filter(p=>filter==='all'||p.difficulty===filter);
+  const packLabels:Record<PuzzlePack,string>={start:t.packStart,signs:t.packSigns,champion:t.packChampion};
+  const first=puzzles.find(p=>canPlay(p.id,progress.unlocked)&&!progress.solvedIds.includes(p.id))??puzzles[0];
+  const locked=!!puzzle&&!canPlay(puzzle.id,progress.unlocked);
+  return <div className={`app-shell ${puzzle?'is-playing':''}`}>
+    <header className="site-header"><div className="header-inner">
+      <a className="brand" href="#/" aria-label={t.appName}><Logo/><span><strong>{t.brand}</strong><small>{t.brandSub}</small></span></a>
+      <nav aria-label={t.catalog} className="main-nav"><a href="#/" className={!puzzle?'active':''}>{t.catalog}</a><button onClick={()=>setModal('rules')}>{t.rules}</button></nav>
+      <div className="header-tools"><button className="icon-button mobile-rules" onClick={()=>setModal('rules')} aria-label={t.rules}><Icon name="book"/></button><button className="icon-button parent-settings-button" onClick={()=>openParentGate('settings')} aria-label={t.parentSettings} title={t.parentSettings}><Icon name="lock" size={18}/></button><label className="language-picker"><Icon name="globe" size={17}/><select aria-label={t.language} value={language} onChange={e=>setLanguage(e.target.value as Language)}><option value="ru">Русский</option><option value="he">עברית</option></select><svg aria-hidden="true" width="10" height="7" viewBox="0 0 10 7"><path d="m1 1 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5"/></svg></label></div>
+    </div></header>
+    {storageError&&<p className="storage-warning" role="status">{t.storageError}</p>}
+    {paymentMessage&&!paymentPage&&<p className={`payment-status ${paymentMessage==='unlockSuccess'?'success':''}`} role="status">{t[paymentMessage]}</p>}
+    {paymentPage?<PaymentReturn page={returnPage as '/success'|'/cancel'} message={paymentMessage} t={t} onBack={home}/>:puzzle?locked?<main className="play-main gate-main"><div className="play-breadcrumb"><button className="text-button" onClick={home}><Icon name="back" className="directional"/>{t.back}</button><span>{t.puzzle} {number(puzzle)}</span></div><section className="access-gate"><div className="gate-lock"><Icon name="lock" size={30}/></div><h1>{t.lockedTitle}</h1><div className="play-badges"><DifficultyBadge difficulty={puzzle.difficulty} t={t}/><span className="puzzle-title" dir="ltr">{puzzle.title}</span></div><Preview puzzle={puzzle}/><button className="primary-button" onClick={()=>openParentGate('unlock')}><Icon name="lock"/>{t.unlock}</button></section></main>:<Play key={puzzle.id} puzzle={puzzle} t={t} onBack={home} onNext={()=>open(puzzles[(puzzles.indexOf(puzzle)+1)%puzzles.length])} onSolved={()=>addProgress('solvedIds',puzzle.id)} onHint={()=>addProgress('hintedIds',puzzle.id)}/>:<main className="catalog-main">
+      <section className="hero">
+        <div className="hero-copy"><p className="eyebrow"><span className="tiny-spark">✦</span>{t.eyebrow}</p><h1>{t.heroStart}<br/><em>{t.heroEnd}</em></h1><p className="hero-subtitle">{t.subtitle}</p><button className="primary-button" onClick={()=>open(first)}>{progress.solvedIds.length?t.resume:t.start}<Icon className="directional" name="arrow"/></button><p className="hero-note"><span/>{t.heroNote}</p></div>
+        <button className="featured-board" onClick={()=>open(puzzles[0])} aria-label={`${t.tryIt}: ${puzzles[0].title}`}><div className="featured-top"><span>{t.featured}</span><span className="featured-number">01 / {puzzles.length}</span></div><Preview puzzle={puzzles[0]}/><span className="featured-prompt">{t.featuredPrompt}</span><span className="featured-link">{t.tryIt}<Icon name="arrow" size={17} className="directional"/></span><span className="featured-corner" aria-hidden="true">✧</span></button>
       </section>
-    </main>
-  );
-}
-
-function IdentityChip({ profile, onClick, className = "" }: { profile: Profile; onClick: () => void; className?: string }) {
-  const symbol = avatarSymbol(profile.avatarId);
-  return (
-    <button className={`identity-chip ${className}`} onClick={onClick} aria-label={`עריכת זהות: ${profile.name}, ${symbol.label}`}>
-      <span>{symbol.glyph}</span><strong>{profile.name}</strong><small>עריכה</small>
-    </button>
-  );
-}
-
-function ProfileEditor({ profile, onSave, onClose }: { profile: Profile; onSave: (profile: Profile) => void; onClose: () => void }) {
-  const [name, setName] = useState(profile.name);
-  const [avatarId, setAvatarId] = useState(profile.avatarId);
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title">
-        <button className="dialog-close" onClick={onClose} aria-label="סגירה">×</button>
-        <p className="eyebrow">הזהות שלכם</p>
-        <h2 id="profile-title">איך תיראו במשחק?</h2>
-        <label className="profile-name"><span>שם</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={24} autoComplete="nickname" autoFocus /></label>
-        <fieldset className="avatar-picker">
-          <legend>סמל</legend>
-          <div>{AVATAR_CHOICES.map((id) => <button type="button" key={id} className={avatarId === id ? "selected" : ""} onClick={() => setAvatarId(id)} aria-label={SYMBOLS[id].label} aria-pressed={avatarId === id}>{SYMBOLS[id].glyph}</button>)}</div>
-        </fieldset>
-        <button className="primary-button" disabled={!name.trim()} onClick={() => onSave({ ...profile, name: name.trim(), avatarId })}>שמירה</button>
-        <p>השם והסמל נשמרים רק במכשיר הזה.</p>
+      <section className="collection-section" aria-labelledby="collection-title">
+        <div className="collection-header"><div><p className="eyebrow collection-eyebrow">01 — {puzzles.length}</p><h2 id="collection-title">{t.collection}</h2><p>{t.collectionSub}</p></div><div className="progress-widget"><div className="progress-ring"><svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="20"/><circle className="ring-value" cx="24" cy="24" r="20" strokeDasharray={`${progress.solvedIds.length/puzzles.length*125.66} 125.66`}/></svg><Icon name={progress.solvedIds.length===puzzles.length?'check':'spark'} size={19}/></div><div><span>{t.progress}</span><strong className="solved-count"><span>{t.solvedBadge}</span> <bdi dir="ltr"><b>{progress.solvedIds.length}</b> / {puzzles.length}</bdi></strong></div></div></div>
+        {progress.solvedIds.length===puzzles.length&&<p className="collection-complete"><Icon name="check"/>{t.allComplete}</p>}
+        <div className="filter-row"><div className="filters" role="group" aria-label={t.catalog}>{(['all','easy','medium','hard'] as const).map(f=><button key={f} aria-pressed={filter===f} className={filter===f?'selected':''} onClick={()=>setFilter(f)}>{t[f]}<span>{f==='all'?puzzles.length:puzzles.filter(p=>p.difficulty===f).length}</span></button>)}</div><span className="catalog-count">{visible.length} {t.puzzles}</span></div>
+        {visible.length?<div className="pack-list">{PACKS.map(pack=>{const entries=visible.filter(p=>p.pack===pack);if(!entries.length)return null;return <section className="puzzle-pack" data-pack={pack} key={pack} aria-labelledby={`pack-${pack}`}><header className="pack-header"><h3 id={`pack-${pack}`}>{packLabels[pack]}</h3><span>{entries.length} {t.puzzles}</span></header><div className="puzzle-grid">{entries.map(p=>{const solved=progress.solvedIds.includes(p.id),cardLocked=!canPlay(p.id,progress.unlocked);return <button key={p.id} className={`puzzle-card ${solved?'is-solved':''} ${cardLocked?'is-locked':''}`} data-puzzle-id={p.id} onClick={()=>open(p)} aria-label={`${t.puzzle} ${number(p)}: ${p.title}, ${t[p.difficulty]}, ${p.movesAllowed===1?t.oneMove:t.twoMoves}, ${solved?t.solvedBadge:t.notSolved}${cardLocked?`, ${t.lockedTitle}`:''}`}><div className="card-top"><span className="card-number">{number(p)}</span><span className="card-status">{cardLocked&&<span className="locked-tag" aria-label={t.lockedTitle}><Icon name="lock" size={16}/></span>}{solved?<span className="solved-tag"><Icon name="check" size={13}/>{t.solvedBadge}</span>:!cardLocked?<span className="card-open"><Icon name="arrow" size={16} className="directional"/></span>:null}</span></div><Preview puzzle={p}/><div className="card-bottom"><DifficultyBadge difficulty={p.difficulty} t={t}/><span className="card-moves">{progress.hintedIds.includes(p.id)&&<span title={t.hinted}><Icon name="bulb" size={13}/></span>}{p.movesAllowed===1?t.oneMove:t.twoMoves}</span></div></button>;})}</div></section>;})}</div>:<p className="catalog-empty" role="status">{t.catalogEmpty}</p>}
       </section>
+      <footer className="catalog-footer"><p><Icon name="spark" size={16}/>{t.footer}</p><div><span><Icon name="lock" size={13}/>{t.saved}</span><button onClick={()=>openParentGate('settings')}>{t.parentSettings}</button><button onClick={()=>setModal('progress')} disabled={!progress.solvedIds.length&&!progress.hintedIds.length}>{t.resetProgress}</button></div></footer>
+    </main>}
+    <footer className="product-footer"><nav aria-label={t.productNav}><a href="/parents">{t.parents}</a><a href="/privacy">{t.privacy}</a><a href="/rules">{t.productRules}</a></nav><details className="install-help"><summary>{t.installTitle}</summary><p>{t.installHelp}</p><button className="secondary-button" data-install-app hidden>{t.installApp}</button></details></footer>
+    {modal==='rules' &&<Modal title={t.rulesTitle} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.rulesIntro}</p><ol className="rules-list">{[t.rule1,t.rule2,t.rule3,t.rule4,t.rule5].map((r,i)=><li key={i}><span>{String(i+1).padStart(2,'0')}</span>{r}</li>)}</ol><button className="primary-button full-width" onClick={()=>setModal(null)}>{t.gotIt}<Icon name="arrow" className="directional"/></button></Modal>}
+    {modal==='pinSetup'&&<Modal title={t.setParentPin} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.setupPinIntro}</p><PinFields t={t} pin={pin} confirm={pinConfirm} onPin={value=>{setPin(value);setPinError(null);}} onConfirm={value=>{setPinConfirm(value);setPinError(null);}} error={pinError?t[pinError]:null}/><div className="modal-actions"><button className="secondary-button" onClick={()=>setModal(null)} disabled={pinBusy}>{t.cancel}</button><button className="primary-button" onClick={submitPinSetup} disabled={pinBusy}>{t.savePin}</button></div></Modal>}
+    {modal==='pinVerify'&&<Modal title={t.enterParentPin} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.pinGateIntro}</p><PinFields t={t} pin={pin} onPin={value=>{setPin(value);setPinError(null);}} error={pinError?t[pinError]:null}/><div className="modal-actions"><button className="secondary-button" onClick={()=>setModal(null)} disabled={pinBusy}>{t.cancel}</button><button className="primary-button" onClick={submitPinVerify} disabled={pinBusy}>{t.verifyPin}</button></div></Modal>}
+    {modal==='parentChoice'&&<Modal title={t.purchaseOptions} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.fullVersionOffer}</p><p className="test-mode-note">{t.unlockNotice}</p>{checkoutError&&<p className="checkout-error" role="alert">{t.checkoutUnavailable}</p>}<div className="modal-actions purchase-actions"><button className="secondary-button" onClick={openRestore} disabled={checkoutBusy}>{t.haveCode}</button><button className="primary-button" onClick={startCheckout} disabled={checkoutBusy}>{checkoutBusy?t.checkoutStarting:t.buyOnce}</button></div></Modal>}
+    {modal==='restore'&&<Modal title={t.restoreTitle} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.restoreIntro}</p><label className="form-field"><span>{t.restoreLabel}</span><input dir="ltr" value={restoreCode} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} onChange={event=>{setRestoreCode(event.target.value);setRestoreError(null);}}/></label>{restoreError&&<p className="form-error" role="alert">{t[restoreError]}</p>}<div className="modal-actions"><button className="secondary-button" onClick={()=>setModal('parentChoice')} disabled={restoreBusy}>{t.cancel}</button><button className="primary-button" onClick={restoreAccess} disabled={restoreBusy}>{restoreBusy?t.restoreChecking:t.restoreAction}</button></div></Modal>}
+    {modal==='parentSettings'&&<Modal title={t.parentSettings} closeLabel={t.close} onClose={()=>setModal(null)}><h3 className="settings-title">{t.pinReady}</h3><p className="modal-intro">{t.pinReadyBody}</p><div className="modal-actions"><button className="secondary-button" onClick={openRestore}>{t.haveCode}</button><button className="primary-button" onClick={()=>{clearParentForm();setModal('pinSetup');}}>{t.changePin}</button></div></Modal>}
+    {modal==='progress'&&<Modal title={t.resetTitle} closeLabel={t.close} onClose={()=>setModal(null)}><p className="modal-intro">{t.resetBody}</p><div className="modal-actions"><button className="secondary-button" onClick={()=>setModal(null)}>{t.keepProgress}</button><button className="primary-button" onClick={()=>{setProgress(previous=>({...previous,solvedIds:[],hintedIds:[]}));setModal(null);}}>{t.confirmReset}</button></div></Modal>}
+  </div>;
+}
+
+function PinFields({t,pin,confirm,onPin,onConfirm,error}:{t:Copy;pin:string;confirm?:string;onPin:(value:string)=>void;onConfirm?:(value:string)=>void;error:string|null}) {
+  const clean=(value:string)=>value.replace(/\D/g,'').slice(0,4);
+  return <div className="pin-fields">
+    <label className="form-field"><span>{t.pinLabel}</span><input type="password" inputMode="numeric" autoComplete="current-password" pattern="[0-9]{4}" maxLength={4} dir="ltr" value={pin} onChange={event=>onPin(clean(event.target.value))}/></label>
+    {onConfirm&&<label className="form-field"><span>{t.pinConfirmLabel}</span><input type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4}" maxLength={4} dir="ltr" value={confirm} onChange={event=>onConfirm(clean(event.target.value))}/></label>}
+    {error&&<p className="form-error" role="alert">{error}</p>}
+  </div>;
+}
+
+function PaymentReturn({page,message,t,onBack}:{page:'/success'|'/cancel';message:PaymentMessage|null;t:Copy;onBack:()=>void}) {
+  const success=page==='/success',complete=message==='unlockSuccess';
+  return <main className="payment-return"><section><div className={`payment-return-icon ${complete?'complete':''}`}><Icon name={complete?'check':success?'spark':'back'} size={30}/></div><h1>{success?t.paymentSuccessTitle:t.paymentCancelTitle}</h1><p>{success?(message?t[message]:t.paymentSuccessBody):t.paymentCancelBody}</p><button className="primary-button" onClick={onBack}>{t.backToPuzzles}<Icon name="arrow" className="directional"/></button></section></main>;
+}
+
+type Frame = {board:BoardState;matches:Match[]};
+function createFrame(p:Puzzle):Frame {const board=initialBoard(p);return {board,matches:initialMatches(board)};}
+function moveFrame(frame:Frame,move:Move,puzzle:Puzzle):Frame|null {const board=applyMove(frame.board,move,puzzle.glyphs);if(!board)return null;return {board,matches:frame.matches.map(m=>m.slot.glyph===move.from.glyph&&m.slot.segment===move.from.segment?{...m,slot:move.to}:m)};}
+function Play({puzzle,t,onBack,onNext,onSolved,onHint}:{puzzle:Puzzle;t:Copy;onBack:()=>void;onNext:()=>void;onSolved:()=>void;onHint:()=>void}) {
+  const [frames,setFrames]=useState<Frame[]>(()=>[createFrame(puzzle)]);
+  const [won,setWon]=useState(false);
+  const [revealed,setRevealed]=useState(false);
+  const [animating,setAnimating]=useState(false);
+  const [hintLevel,setHintLevel]=useState(0);
+  const [hintMove,setHintMove]=useState<Move|null>(null);
+  const [message,setMessage]=useState<Message|null>(null);
+  const [revealModal,setRevealModal]=useState(false);
+  const [resetKey,setResetKey]=useState(0);
+  const timers=useRef<ReturnType<typeof setTimeout>[]>([]);
+  const frame=frames[frames.length-1], used=frames.length-1;
+  const equation=decode(puzzle.glyphs,frame.board);
+  const stopAnimation=()=>{timers.current.forEach(clearTimeout);timers.current=[];setAnimating(false);};
+  useEffect(()=>()=>timers.current.forEach(clearTimeout),[]);
+  useEffect(()=>{if(!message||['hintOne','hintTwo','hintReset','revealed','invalid','noMoves','solutionUnavailable'].includes(message))return;const timer=setTimeout(()=>setMessage(null),4500);return ()=>clearTimeout(timer);},[message]);
+  function reset(){stopAnimation();setFrames([createFrame(puzzle)]);setWon(false);setRevealed(false);setHintMove(null);setHintLevel(0);setMessage(null);setResetKey(k=>k+1);}
+  function check(board=frame.board,moves=used){if(animating||revealed)return;const result=checkBoard(puzzle,board,moves);if(result==='solved'){setWon(true);setMessage('correct');onSolved();}else setMessage(moves>=puzzle.movesAllowed?'noMoves':result);}
+  function move(move:Move){
+    if(won||revealed||animating)return;
+    if(used>=puzzle.movesAllowed){setMessage('noMoves');return;}
+    const next=moveFrame(frame,move,puzzle);if(!next)return;
+    setFrames([...frames,next]);setHintLevel(0);setHintMove(null);setMessage(null);
+    const result=checkBoard(puzzle,next.board,used+1);
+    if(result==='solved'){setWon(true);setMessage('correct');onSolved();}
+    else if(used+1>=puzzle.movesAllowed)setMessage('noMoves');
+    else if(result==='invalid')setMessage('invalid');
+  }
+  function undo(){if(used===0||animating)return;setFrames(frames.slice(0,-1));setWon(false);setRevealed(false);setMessage(null);setHintMove(null);setHintLevel(0);}
+  function hint(){
+    const path=solutionMoves(puzzle,frame.board,(puzzle.movesAllowed-used) as 1|2);
+    if(!path?.length){setMessage(solutionMoves(puzzle)?'hintReset':'solutionUnavailable');return;}
+    const level=Math.min(2,hintLevel+1);setHintMove(path[0]);setHintLevel(level);setMessage(level===1?'hintOne':'hintTwo');onHint();
+  }
+  function reveal(){
+    const path=solutionMoves(puzzle);
+    if(!path?.length){setRevealModal(false);setMessage('solutionUnavailable');return;}
+    setRevealModal(false);reset();onHint();setAnimating(true);setMessage('revealed');
+    path.forEach((step,index)=>{timers.current.push(setTimeout(()=>setFrames(history=>{const next=moveFrame(history[history.length-1],step,puzzle);return next?[...history,next]:history;}),450+index*900));});
+    timers.current.push(setTimeout(()=>{setAnimating(false);setRevealed(true);},450+path.length*900));
+  }
+  return <main className="play-main">
+    <div className="play-breadcrumb"><button className="text-button" onClick={onBack}><Icon name="back" className="directional" size={18}/>{t.back}</button><span>{t.puzzle} <b dir="ltr">{number(puzzle)} / {puzzles.length}</b></span></div>
+    <section className="play-intro">
+      <div className="play-summary"><div className="play-badges"><DifficultyBadge difficulty={puzzle.difficulty} t={t}/><span className="subtle-separator"/><span className="puzzle-title" dir="ltr">{puzzle.title}</span></div><div className="move-counter" aria-label={`${t.moves}: ${used} ${t.outOf} ${puzzle.movesAllowed}`}><span>{t.moves}</span><div className="move-dots" aria-hidden="true">{Array.from({length:puzzle.movesAllowed},(_,i)=><i key={i} className={i<used?'used':''}/>)}</div><b dir="ltr">{used} / {puzzle.movesAllowed}</b></div></div>
+      <h1>{won?t.correct:revealed?t.revealed:t.boardTitle}</h1><p>{won?t.correctSub:revealed?t.revealedSub:puzzle.movesAllowed===1?t.boardSubtitleOne:t.boardSubtitleTwo}</p>
+    </section>
+    <section className={`play-table ${won?'table-solved':''}`} aria-label={`${t.puzzle} ${number(puzzle)}: ${puzzle.title}`}>
+
+      <div className="board-stage"><Board puzzle={puzzle} board={frame.board} matches={frame.matches} onMove={move} disabled={won||revealed||animating||used>=puzzle.movesAllowed} hint={hintMove?{from:hintMove.from,...(hintLevel>1?{to:hintMove.to}:{})}:null} copy={t} celebrate={won} resetKey={resetKey} demonstrating={animating}/>{won&&<div className="celebration-sparks" aria-hidden="true">{Array.from({length:12},(_,i)=><i key={i} style={{'--i':i} as React.CSSProperties}>✧</i>)}</div>}</div>
+      <div className={`board-message ${message?'has-message':''}`} role="status" aria-live="polite" aria-atomic="true">{message?<span className={message==='correct'?'positive':message.startsWith('hint')?'hint-note':''}><Icon name={message==='correct'?'check':message.startsWith('hint')?'bulb':'spark'} size={17}/>{t[message]}</span>:<span><span className="drag-cursor" aria-hidden="true">↗</span>{t.dragHelp}</span>}</div>
+      <div className="table-bottom"><span className="little-match" aria-hidden="true"/><span>{!equation?t.invalid:won?'✓':t.tapHelp}</span><span className="little-match" aria-hidden="true"/></div>
+    </section>
+    <p className="sr-only" id="board-keyboard-help">{t.keyboardHelp}</p><p className="sr-only" aria-live="polite">{equation?`${t.currentEquation}: ${equation}`:t.invalid}</p>
+    <div className="play-actions" role="group" aria-label={t.controls}>
+      <div className="utility-actions">
+        <button className="secondary-button" onClick={undo} disabled={!used||animating||revealed}><Icon name="undo"/>{t.undo}</button>
+        <button className="secondary-button" onClick={reset}><Icon name="reset"/>{t.reset}</button>
+        <button className={`secondary-button ${hintLevel?'hint-active':''}`} onClick={hint} disabled={won||revealed||animating}><Icon name="bulb"/><span>{t.hint}{hintLevel>0&&<span className="hint-count"> {hintLevel}/2</span>}</span></button>
+      </div>
+      <button className="primary-button check-button" onClick={()=>check()} disabled={won||revealed||animating}><Icon name="check"/>{t.check}</button>
+      <button className="secondary-button solution-button" onClick={()=>setRevealModal(true)} disabled={won||revealed||animating}><Icon name="eye"/>{t.solution}</button>
     </div>
-  );
-}
-
-function TopBar(props: { room: RoomSnapshot; profile: Profile; connected: boolean; copied: boolean; onCopy: () => void; onEditProfile: () => void; onLeave: () => void }) {
-  return (
-    <header className="topbar">
-      <div className="mini-brand"><span className="mini-logo">⚡</span><strong>Dobble Live</strong></div>
-      <button className="room-code-chip" onClick={props.onCopy} aria-label="העתקת קוד החדר"><small>חדר</small><b dir="ltr">{props.room.code}</b><span>{props.copied ? "הועתק" : "העתקה"}</span></button>
-      <IdentityChip profile={props.profile} onClick={props.onEditProfile} />
-      <button className="text-button" onClick={props.onLeave}>יציאה</button>
-      <span className={`connection-light ${props.connected ? "online" : ""}`} title={props.connected ? "מחובר" : "מנותק"} />
-    </header>
-  );
-}
-
-function Lobby(props: {
-  room: RoomSnapshot;
-  playerId: string;
-  busy: boolean;
-  copiedCode: boolean;
-  copiedLink: boolean;
-  inviteUrl: string;
-  serverNow: number;
-  onCopy: () => void;
-  onInvite: () => void;
-  onDeckSizeChange: (deckSize: DeckSize) => void;
-  onStart: () => void;
-}) {
-  const connectedCount = props.room.players.filter((player) => player.connected).length;
-  const canStart = connectedCount >= 2;
-  const countdown = props.room.autoStartAt ? Math.max(1, Math.ceil((props.room.autoStartAt - props.serverNow) / 1000)) : null;
-  return (
-    <section className="lobby-page page-panel">
-      <div className="lobby-intro">
-        <p className="eyebrow">{props.room.visibility === "public" ? "משחק מהיר" : "החדר מוכן"}</p>
-        <h1>{countdown ? `מתחילים בעוד ${countdown}` : connectedCount > 1 ? "כולם כאן. אפשר להתחיל" : "מזמינים חברים ומתחילים"}</h1>
-        <p>{props.room.visibility === "public" && connectedCount < 2 ? "מחפשים לכם שחקנים. אפשר גם להזמין חברים בינתיים." : "שלוש דרכים פשוטות להכניס את כולם לחדר."}</p>
-      </div>
-
-      <div className="invite-grid">
-        <div className="invite-card qr-card"><span>סריקה מהירה</span><QrCode value={props.inviteUrl} /><small>סורקים ונכנסים ישר לחדר</small></div>
-        <button className="invite-card share-card" onClick={props.onInvite}>
-          <span className="share-glyph">↗</span><strong>{props.copiedLink ? "הקישור הועתק ✓" : "הזמנת חברים"}</strong><small>WhatsApp, הודעה או כל אפליקציה</small>
-        </button>
-        <button className="invite-card code-card" onClick={props.onCopy}>
-          <span>קוד החדר</span><strong dir="ltr">{props.room.code}</strong><small>{props.copiedCode ? "הקוד הועתק ✓" : "לחצו להעתקה"}</small>
-        </button>
-      </div>
-
-      <div className="player-list-wrap">
-        <div className="section-heading"><h2>שחקנים</h2><span>{props.room.players.length}/4</span></div>
-        <div className="player-list">
-          {props.room.players.map((player) => (
-            <div className={`player-row ${!player.connected ? "offline" : ""}`} key={player.id}>
-              <div className="avatar">{avatarSymbol(player.avatarId).glyph}</div>
-              <strong>{player.name}{player.id === props.playerId && <small> אתם</small>}</strong>
-              <span className={`ready-state ${player.connected ? "" : "offline"}`}>{player.connected ? "מוכן" : "שומרים מקום…"}</span>
-            </div>
-          ))}
-          {Array.from({ length: Math.max(0, 4 - props.room.players.length) }, (_, index) => <div className="player-row empty" key={index}><div className="avatar">+</div><span>מקום פנוי</span></div>)}
-        </div>
-      </div>
-      <DeckSizePicker room={props.room} onChange={props.onDeckSizeChange} />
-      <button className="primary-button lobby-start" disabled={!canStart || props.busy} onClick={props.onStart}>
-        {countdown ? `מתחילים עכשיו · ${countdown}` : canStart ? "מתחילים לשחק" : props.room.visibility === "public" ? "מחפשים עוד שחקן…" : "מחכים לעוד שחקן"}
-      </button>
-      <p className="hostless-note">כל אחד יכול להתחיל · החדר לא תלוי במארח</p>
-    </section>
-  );
-}
-
-function QrCode({ value }: { value: string }) {
-  const [source, setSource] = useState("");
-  useEffect(() => {
-    let active = true;
-    QRCode.toDataURL(value, {
-      width: 260,
-      margin: 1,
-      errorCorrectionLevel: "M",
-      color: { dark: "#17213aff", light: "#ffffffff" },
-    }).then((url) => { if (active) setSource(url); }).catch(() => setSource(""));
-    return () => { active = false; };
-  }, [value]);
-  return source ? <img src={source} alt="קוד QR להצטרפות לחדר" /> : <div className="qr-placeholder" aria-label="מכינים קוד QR" />;
-}
-
-function WaitingForNextRound({ room, inviteUrl, onInvite }: { room: RoomSnapshot; inviteUrl: string; onInvite: () => void }) {
-  return (
-    <section className="waiting-round page-panel">
-      <div className="waiting-symbol">{avatarSymbol(room.players.at(-1)?.avatarId ?? 2).glyph}</div>
-      <p className="eyebrow">נכנסתם למשחק</p>
-      <h1>מצטרפים בסיבוב הבא</h1>
-      <p>הסיבובים קצרים. צופים לרגע ומקבלים קלף אוטומטית כשהסיבוב הנוכחי מסתיים.</p>
-      <button className="primary-button" onClick={onInvite}>להזמין עוד חברים</button>
-      <small>{inviteUrl}</small>
-    </section>
-  );
-}
-
-function GameBoard(props: { room: RoomSnapshot; playerId: string; round: RoundPreparePayload; result: RoundResultPayload | null; serverNow: number; lockUntil: number; wrongSymbol: number | null; connected: boolean; onPick: (symbolId: number) => void }) {
-  const { room, playerId, round, result, serverNow, lockUntil, wrongSymbol, connected, onPick } = props;
-  const waitingMs = Math.max(0, round.startsAt - serverNow);
-  const timeLeft = Math.max(0, round.endsAt - serverNow);
-  const lockedMs = Math.max(0, lockUntil - serverNow);
-  const active = waitingMs <= 0 && !result && connected;
-  const progress = Math.min(100, (timeLeft / room.roundTimeoutMs) * 100);
-  return (
-    <section className="game-page">
-      <ScoreStrip room={room} playerId={playerId} />
-      <div className="round-meta"><span>סיבוב {round.number}</span><b>{Math.ceil(timeLeft / 1000)} שנ׳</b><span>{round.deckRemaining} קלפים נשארו</span></div>
-      <div className="timer-track"><span style={{ width: `${progress}%` }} /></div>
-      <div className={`cards-stage ${waitingMs > 0 ? "is-waiting" : ""}`}>
-        <div className="card-block center-block"><p><span>קלף מרכזי</span> מוצאים את הסמל המשותף</p><SymbolCard card={round.centerCard} variant="center" highlighted={result?.correctSymbolId ?? null} /></div>
-        <div className="versus-pill">גם פה!</div>
-        <div className="card-block personal-block"><p><span>הקלף שלכם</span> לחצו על הסמל הזהה</p><SymbolCard card={round.personalCard} variant="personal" highlighted={result?.correctSymbolId ?? null} wrongSymbol={wrongSymbol} disabled={!active || lockedMs > 0} onPick={onPick} /></div>
-        {waitingMs > 0 && <div className="ready-overlay"><small>מוכנים?</small><strong>{Math.max(1, Math.ceil(waitingMs / 1000))}</strong></div>}
-        {lockedMs > 0 && !result && <div className="lock-badge" role="status"><b>אופס, לא זה</b><span>אפשר לנסות שוב בעוד {(lockedMs / 1000).toFixed(1)} שנ׳</span></div>}
-      </div>
-      {result && <RoundOverlay result={result} />}
-    </section>
-  );
-}
-
-function ScoreStrip({ room, playerId }: { room: RoomSnapshot; playerId: string }) {
-  return <div className="score-strip">{room.players.map((player) => <div className={`score-chip ${player.id === playerId ? "me" : ""}`} key={player.id}><span className="avatar">{avatarSymbol(player.avatarId).glyph}</span><div><small>{player.name}{player.id === playerId ? " · אתם" : ""}</small><strong>{player.score}</strong></div></div>)}</div>;
-}
-
-const CARD_POSITIONS = [
-  [50, 15], [77, 28], [82, 59], [66, 82], [34, 83], [16, 61], [20, 29], [50, 51],
-] as const;
-
-function SymbolCard({ card, variant, highlighted, wrongSymbol, disabled = false, onPick }: { card: CardPayload; variant: "center" | "personal"; highlighted: number | null; wrongSymbol?: number | null; disabled?: boolean; onPick?: (symbolId: number) => void }) {
-  return (
-    <div className={`symbol-card ${variant}`} aria-label={variant === "center" ? "קלף מרכזי" : "הקלף שלכם"}>
-      <div className="card-ring" aria-hidden="true" />
-      {card.symbols.map((symbolId, index) => {
-        const symbol = SYMBOLS[symbolId];
-        const [left, top] = CARD_POSITIONS[index];
-        const { scale, rotation } = getSymbolVariation(card.id, symbolId, index);
-        const style = { "--left": `${left}%`, "--top": `${top}%`, "--scale": scale, "--rotate": `${rotation}deg` } as CSSProperties;
-        const className = `symbol-button ${highlighted === symbolId ? "highlighted" : ""} ${wrongSymbol === symbolId ? "wrong" : ""}`;
-        return variant === "personal"
-          ? <button key={symbolId} className={className} style={style} disabled={disabled} onClick={() => onPick?.(symbolId)} aria-label={symbol.label}>{symbol.glyph}</button>
-          : <span key={symbolId} className={className} style={style} role="img" aria-label={symbol.label}>{symbol.glyph}</span>;
-      })}
-    </div>
-  );
-}
-
-function RoundOverlay({ result }: { result: RoundResultPayload }) {
-  const symbol = SYMBOLS[result.correctSymbolId];
-  return (
-    <div className="result-overlay" role="status" aria-live="assertive">
-      <div className="result-card">
-        <span className="answer-symbol">{symbol.glyph}</span>
-        {result.reason === "winner" ? <><p>מצאנו מנצח!</p><h2>{result.winnerName}</h2><strong>{((result.reactionMs ?? 0) / 1000).toFixed(2)} שניות</strong></> : <><p>נגמר הזמן</p><h2>זה היה {symbol.label}</h2><strong>ממשיכים מיד</strong></>}
-      </div>
-    </div>
-  );
-}
-
-function Results({ room, playerId, busy, onDeckSizeChange, onRestart }: { room: RoomSnapshot; playerId: string; busy: boolean; onDeckSizeChange: (deckSize: DeckSize) => void; onRestart: () => void }) {
-  const ranked = useMemo(() => [...room.players].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "he")), [room.players]);
-  const winner = ranked[0];
-  return (
-    <section className="results-page page-panel">
-      <div className="confetti" aria-hidden="true">✦　●　★　◆　✦</div>
-      <p className="eyebrow">החפיסה הסתיימה</p>
-      <h1>{winner?.id === playerId ? "ניצחתם!" : `${winner?.name ?? ""} במקום הראשון`}</h1>
-      <p>משחק מעולה. הנה הדירוג הסופי:</p>
-      <div className="podium-list">{ranked.map((player, index) => <div className={`podium-row place-${index + 1}`} key={player.id}><span className="place">{index + 1}</span><div className="avatar">{avatarSymbol(player.avatarId).glyph}</div><strong>{player.name}{player.id === playerId && <small> אתם</small>}</strong><b>{player.score}<small> נק׳</small></b></div>)}</div>
-      <DeckSizePicker room={room} onChange={onDeckSizeChange} />
-      <button className="primary-button" disabled={busy || room.players.filter((player) => player.connected).length < 2} onClick={onRestart}>משחק נוסף</button>
-      <p className="hostless-note">כל שחקן בחדר יכול להתחיל את המשחק הבא.</p>
-    </section>
-  );
-}
-
-function DeckSizePicker({ room, onChange }: { room: RoomSnapshot; onChange: (deckSize: DeckSize) => void }) {
-  const playerCount = Math.max(2, room.players.filter((player) => player.connected).length);
-  return (
-    <fieldset className="deck-size-picker">
-      <div className="deck-size-heading"><legend>אורך המשחק</legend><small>אפשר לשנות עד שמתחילים</small></div>
-      <div className="deck-size-options">
-        {DECK_SIZE_OPTIONS.map((deckSize) => (
-          <button type="button" className={room.deckSize === deckSize ? "active" : ""} key={deckSize} aria-pressed={room.deckSize === deckSize} onClick={() => onChange(deckSize)}>
-            <strong>{DECK_SIZE_LABELS[deckSize]}</strong><span>{deckSize} קלפים</span><small>{Math.floor(deckSize / (playerCount + 1))} סיבובים</small>
-          </button>
-        ))}
-      </div>
-      <p>השינוי מופיע מיד אצל כל השחקנים.</p>
-    </fieldset>
-  );
-}
-
-function LoadingScreen({ connected }: { connected: boolean }) {
-  return <main className="loading-page"><div className="loading-symbols"><span>⭐</span><span>🍀</span><span>⚡</span></div><strong>{connected ? "מכניסים אתכם לחדר…" : "מתחברים…"}</strong></main>;
-}
-
-function Toast({ message, onClose }: { message: string; onClose: () => void }) {
-  return <button className="toast" onClick={onClose} role="alert">{message}<span>×</span></button>;
+    {(won||revealed)&&<div className="play-followup">{won?<button className="primary-button" onClick={onNext}>{t.solvedAction}<Icon name="arrow" className="directional"/></button>:<button className="primary-button" onClick={reset}>{t.restart}<Icon name="reset"/></button>}</div>}
+    <div className="play-underbar"><span>{t.heroNote}</span></div>
+    <div className="puzzle-stepper"><span className="stepper-line"/>{puzzles.map(p=><button key={p.id} className={p.id===puzzle.id?'current':''} onClick={()=>{window.location.hash=`/puzzle/${p.id}`;}} aria-label={`${t.puzzle} ${number(p)}`} aria-current={p.id===puzzle.id?'step':undefined}><span>{number(p)}</span></button>)}<span className="stepper-line"/></div>
+    {revealModal&&<Modal title={t.revealTitle} closeLabel={t.close} onClose={()=>setRevealModal(false)}><p className="modal-intro">{t.revealBody}</p><div className="modal-actions"><button className="secondary-button" onClick={()=>setRevealModal(false)}>{t.cancel}</button><button className="primary-button" onClick={reveal}>{t.confirmSolution}<Icon name="eye"/></button></div></Modal>}
+  </main>;
 }

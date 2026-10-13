@@ -1,33 +1,41 @@
 {
-  "name": "dobble-live",
+  "name": "matchstick-arithmetic",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=22.13.0"
-  },
   "scripts": {
-    "dev": "tsx watch server/index.ts",
-    "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "NODE_ENV=production node dist-server/server/index.js",
-    "test": "tsx --test tests/*.test.ts",
-    "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build && node --import tsx scripts/build-site.ts",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs",
+    "test:server": "node --test tests/server.test.mjs",
+    "test:browser": "node tests/browser.mjs",
+    "test:i18n": "node tests/i18n-browser.mjs",
+    "test:mobile": "node tests/mobile.mjs",
+    "test:pwa": "node tests/pwa.mjs",
+    "test:access": "node --import tsx tests/access-browser.mjs",
+    "test:parent": "node tests/parent-flow.mjs",
+    "test:controls": "node tests/controls.mjs",
+    "test:catalog-browser": "node --import tsx tests/catalog-browser.mjs",
+    "test:soft-launch": "node tests/soft-launch-qa.mjs"
   },
   "dependencies": {
-    "express": "5.1.0",
-    "qrcode": "^1.5.4",
+    "compression": "1.8.2",
+    "express": "5.2.1",
+    "helmet": "8.3.0",
+    "pg": "8.23.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "socket.io": "4.8.1",
-    "socket.io-client": "4.8.1"
+    "stripe": "22.6.2"
   },
   "devDependencies": {
-    "@types/express": "5.0.3",
+    "@tailwindcss/vite": "^4.2.0",
     "@types/node": "22.19.19",
-    "@types/qrcode": "^1.5.6",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
+    "playwright": "^1.63.0",
+    "tailwindcss": "^4.2.0",
     "tsx": "4.20.5",
     "typescript": "5.9.3",
     "vite": "8.2.2"
