@@ -1,3 +1,5 @@
+import { Children } from 'react';
+
 export type IconName = 'arrow' | 'back' | 'undo' | 'reset' | 'bulb' | 'check' | 'eye' | 'close' | 'globe' | 'book' | 'spark' | 'lock' | 'chevron';
 const paths: Record<IconName, React.ReactNode> = {
   arrow:<><path d="M4 12h15m-6-6 6 6-6 6"/></>,
@@ -14,5 +16,13 @@ const paths: Record<IconName, React.ReactNode> = {
   lock:<><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></>,
   chevron:<path d="m9 5 7 7-7 7"/>,
 };
-export function Icon({name,size=20,className=''}:{name:IconName;size?:number;className?:string}) { return <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>; }
+export function Icon({name,size=20,className=''}:{name:IconName;size?:number;className?:string}) {
+  // normalize children to a single group to avoid React attempting unstable insertBefore
+  const children = Children.toArray(paths[name]);
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <g>{children}</g>
+    </svg>
+  );
+}
 export function Logo() { return <svg width="40" height="40" viewBox="0 0 44 44" fill="none" aria-hidden="true"><rect x=".5" y=".5" width="43" height="43" rx="12" fill="#2d2419" stroke="#645036"/><path d="M12 31V12l10 14 10-14v19" stroke="#d9ba84" strokeWidth="3.5" strokeLinecap="round"/><path d="M12 12v3m20-3v3" stroke="#b36540" strokeWidth="5" strokeLinecap="round"/></svg>; }
