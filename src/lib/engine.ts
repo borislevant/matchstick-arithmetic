@@ -1,4 +1,4 @@
-export type Difficulty = 'easy' | 'medium' | 'hard';
+export type Difficulty = 'trivial' | 'easy' | 'medium' | 'hard' | 'very_hard';
 export type PuzzlePack = 'start' | 'signs' | 'champion';
 export type Glyph = { type: 'digit' | 'plus' | 'minus' | 'equals' | 'times'; initialSegments: boolean[]; optional?: boolean };
 export type Slot = { glyph: number; segment: number };
@@ -7,6 +7,11 @@ export type BoardState = boolean[][];
 export type Puzzle = {
   id: string; title: string; difficulty: Difficulty; pack: PuzzlePack; movesAllowed: 1 | 2;
   glyphs: Glyph[]; acceptedSolutions: string[];
+  // Optional metadata
+  minDistance?: number;
+  verificationStatus?: 'complete' | 'incomplete' | 'unsupported';
+  version?: number;
+  // Hints for first move (optional)
   hintRemoveGlyphIndex?: number; hintRemoveSegmentIndex?: number;
   hintPlaceGlyphIndex?: number; hintPlaceSegmentIndex?: number;
 };

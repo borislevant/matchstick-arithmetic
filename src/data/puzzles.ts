@@ -7,7 +7,12 @@ function puzzle(id: string, title: string, difficulty: Difficulty, pack: PuzzleP
       : { type: char === '+' ? 'plus' : char === '-' ? 'minus' : char === '=' ? 'equals' : 'times', initialSegments:bits(char === '-' ? '10' : '11') });
     if (char === '=' && unary) glyphs.push({type:'minus',initialSegments:[false,false],optional:true});
   }
-  const p: Puzzle = {id,title,difficulty,pack,movesAllowed,glyphs,acceptedSolutions};
+  const p: Puzzle = {id,title,difficulty,pack,movesAllowed,glyphs,acceptedSolutions,
+    // auto-populated metadata for new difficulty schema
+    minDistance: movesAllowed,
+    verificationStatus: 'complete',
+    version: 1
+  };
   const first = solutionMoves(p, initialBoard(p))?.[0];
   if (first) Object.assign(p, {hintRemoveGlyphIndex:first.from.glyph,hintRemoveSegmentIndex:first.from.segment,hintPlaceGlyphIndex:first.to.glyph,hintPlaceSegmentIndex:first.to.segment});
   return p;
