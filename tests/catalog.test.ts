@@ -15,3 +15,16 @@ test('failed catalog fetch does not silently fall back to stale puzzles',async()
  const original=globalThis.fetch;globalThis.fetch=(async()=>new Response('unavailable',{status:503})) as typeof fetch;
  try{await assert.rejects(loadCatalog());}finally{globalThis.fetch=original;}
 });
+test('catalog rejects solved starts and awaits complete verification before publishing',async()=>{
+ const previous=[...puzzles];
+ const shortcut=authored.find(p=>p.title==='1+9=7')!;
+ await assert.rejects(setCatalog([structuredClone(shortcut)],{verify:true})!);
+ assert.deepEqual(puzzles,previous);
+ await setCatalog([structuredClone(authored[0])],{verify:true});
+ assert.equal(puzzles.length,1);
+ assert.equal(puzzles[0].minDistance,1);
+ const solved={...structuredClone(authored[0]),title:'1+1=2'};
+ solved.glyphs[4].initialSegments=[true,true,false,true,true,false,true];
+ assert.throws(()=>setCatalog([solved]));
+ setCatalog(authored);
+});

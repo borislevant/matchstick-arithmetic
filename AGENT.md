@@ -233,3 +233,19 @@ Existing SSH repository access was refused; the upload used an MCP-minted short-
 - iPhone-width WebKit and Android-width Chrome emulation pass; physical-device installation and physical Safari/Chrome remain outstanding.
 - Playwright's matching bundled Chromium is absent on this machine; the current checks passed using `CHROMIUM_PATH` pointed at installed Chrome.
 - The repository now ignores local environment files, dependencies, generated output, and screenshots. `.env.example` is the only environment file allowed in git and contains placeholders only.
+
+
+## Release 1.0.1 — merge corrections (2026-10-27)
+
+- Restored the build with five translated difficulty labels, badges, filters, and wrapped mobile filter controls. Existing authored IDs, free access, equations, and saved progress are unchanged.
+- Fixed generated puzzle starting occupancy/title, seeded reproducibility, answer enumeration, shorter-solution detection, bounded failure states, and awaitable explicit catalog verification. Added replay and independent-reference regressions. Generation helpers remain offline; playable column layouts and automatic practice remain pending.
+- Release identifier is available at `/release.json`; package version is 1.0.1. Run `npm test`, `npm run build`, and the browser suites against the built preview.
+- Live hosting inventory on October 27 shows BOTH staging and prod running the former Session 10 artifact `6b7800cd0057324b042290670f82c3b5367ff338`; earlier statements that prod was undeployed are historical. This request authorizes staging deployment only.
+- Known limitations: the 40 authored puzzles still use editorial three-level assignments; the two new filter levels are empty, exhaustive authored minimum-distance audit is pending, no playable vertical layout or automatic practice is exposed, and the static hosting target has no payment API.
+
+- Local validation completed: production build, 91 unit/API checks, all 40 touch-solved catalog puzzles, 40 general, 62 mobile, 32 language, 132 access, 16 parent, 69 controls, 52 PWA checks, five-filter phone-width checks in both languages, and the WebKit/Chrome soft-launch suite. The soft-launch relock fixture now dispatches the storage update before reloading to avoid racing the app's progress persistence effect.
+
+- Staging deployment succeeded: artifact `31e7c7b4aebb255555d5a619217232a318d4623f`, deployment `7838b392-b9ac-4175-ae22-f4e0384a821b`, on 2026-10-27. URL: https://staging-matchstick-arithmetic-levant.xhostd.app. Deployment includes built static output only.
+- The user explicitly approved committing and pushing the tested source fixes to main after automatic approval review initially rejected that shared-branch write as outside staging-deployment authorization. `/release.json` reports base revision `f264dc78a6211df64cba87cd35a1ce32104b9c0d`, `sourceDirty: true`, and exact source digest `f556887b6af34a3e24e4a26fbde7c90a8bebc663e77a3027d21276efdb227ec3`. The staging metadata records the pre-commit build; committing the same source does not change the deployed artifact.
+
+- Live staging verification passed: all 22 deployed files match the tested output byte-for-byte; all 40 catalog puzzles solved by touch; 40 general browser checks and five difficulty filters/empty states passed in Russian/Hebrew at 320px and 390px. Production remains on artifact `6b7800cd0057324b042290670f82c3b5367ff338`.

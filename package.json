@@ -1,6 +1,6 @@
 {
   "name": "matchstick-arithmetic",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,7 +17,8 @@
     "test:parent": "node tests/parent-flow.mjs",
     "test:controls": "node tests/controls.mjs",
     "test:catalog-browser": "node --import tsx tests/catalog-browser.mjs",
-    "test:soft-launch": "node tests/soft-launch-qa.mjs"
+    "test:soft-launch": "node tests/soft-launch-qa.mjs",
+    "test:difficulty": "node tests/difficulty-browser.mjs"
   },
   "dependencies": {
     "compression": "1.8.2",

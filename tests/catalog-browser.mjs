@@ -12,9 +12,9 @@ try {
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(url);await page.waitForSelector('.puzzle-card');
   await page.locator('select').selectOption('ru');
-  for(const [label,difficulty] of [['Все','all'],['Легко','easy'],['Средне','medium'],['Сложно','hard']]){
+  for(const [label,difficulty] of [['Все','all'],['Очень легко','trivial'],['Легко','easy'],['Средне','medium'],['Сложно','hard'],['Очень сложно','very_hard']]){
     const expected=difficulty==='all'?puzzles:puzzles.filter(p=>p.difficulty===difficulty);
-    await page.locator('.filters button').filter({hasText:label}).click();
+    await page.getByRole('button',{name:`${label} ${expected.length}`,exact:true}).click();
     assert.equal(await page.locator('.puzzle-card').count(),expected.length,label);
     for(const [i,p] of expected.entries()){
       const card=page.locator('.puzzle-card').nth(i);

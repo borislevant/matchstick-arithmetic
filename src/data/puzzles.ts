@@ -8,9 +8,8 @@ function puzzle(id: string, title: string, difficulty: Difficulty, pack: PuzzleP
     if (char === '=' && unary) glyphs.push({type:'minus',initialSegments:[false,false],optional:true});
   }
   const p: Puzzle = {id,title,difficulty,pack,movesAllowed,glyphs,acceptedSolutions,
-    // auto-populated metadata for new difficulty schema
-    minDistance: movesAllowed,
-    verificationStatus: 'complete',
+    // Authored solution paths are tested; exhaustive alternative-answer audit is pending.
+    verificationStatus: 'unsupported',
     version: 1
   };
   const first = solutionMoves(p, initialBoard(p))?.[0];

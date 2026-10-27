@@ -1,5 +1,6 @@
 import {readFile,writeFile,mkdir,readdir} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
 import {puzzles} from '../src/data/puzzles';
 import {productChrome,productPages,type ProductLanguage,type ProductPage,type ProductPageId} from '../src/lib/product-content';
 
@@ -36,6 +37,13 @@ for(const route of ['success','cancel']){
 }
 
 await writeFile('dist/puzzles.json',JSON.stringify(puzzles));
+const {version}=JSON.parse(await readFile('package.json','utf8'));
+const sourceRevision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+const sourceDirty=execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim().length>0;
+const sourceDigest=createHash('sha256');
+const sourceFiles=execFileSync('git',['ls-files','-z','--','src','scripts','public','package.json','package-lock.json','index.html','vite.config.ts','tsconfig.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
+for(const file of sourceFiles)sourceDigest.update(file).update(await readFile(file));
+await writeFile('dist/release.json',JSON.stringify({version,sourceRevision,sourceDirty,sourceDigest:sourceDigest.digest('hex')}));
 await writeFile('dist/index.html',appIndex);
 const files=await readdir('dist',{recursive:true});
 const shell=['/','/parents/','/privacy/','/rules/',...files.filter(f=>/\.(html|css|js|png|svg|webmanifest)$/.test(f)&&f!=='sw.js').map(f=>`/${f}`)];

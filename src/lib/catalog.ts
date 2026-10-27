@@ -11,30 +11,25 @@ export function setCatalog(value: unknown, options?: { verify?: boolean }) {
         !Array.isArray(p.glyphs) || !Array.isArray(p.acceptedSolutions) || !p.acceptedSolutions.length ||
         !p.acceptedSolutions.every((s: unknown)=>typeof s==='string'&&trueEquation(s)) ||
         !p.glyphs.every((g: {type: string;initialSegments: unknown})=>g&&['digit','plus','minus','equals','times'].includes(g.type)&&Array.isArray(g.initialSegments)&&g.initialSegments.length===(g.type==='digit'?7:2)&&g.initialSegments.every(v=>typeof v==='boolean')) ||
-        decode(p.glyphs,initialBoard(p))!==p.title) throw new Error('Invalid catalog');
+        decode(p.glyphs,initialBoard(p))!==p.title || trueEquation(p.title)) throw new Error('Invalid catalog');
     ids.add(p.id);
   }
 
-  puzzles = value as Puzzle[];
-
-  // Optionally run verifier for each puzzle to compute/confirm minDistance and verificationStatus.
+  const candidate = value as Puzzle[];
   if (options?.verify) {
-    // Run in background; don't block catalog loading. Consumers can re-read puzzles after verification completes.
-    (async () => {
-      for (const p of puzzles) {
-        try {
-          const res: VerificationResult = await verifyPuzzle(p, { timeoutMs: 2000 });
-          // Attach computed fields if missing or update if different
-          if (res.minDistance !== undefined) p.minDistance = res.minDistance;
-          p.verificationStatus = res.status;
-          p.version = (p.version ?? 0) || 1;
-        } catch (err) {
-          // On verifier failure, mark as unsupported
-          (p as any).verificationStatus = 'unsupported';
-        }
+    // Explicit offline verification: callers can await completion. Publish only a verified batch.
+    return (async () => {
+      for (const p of candidate) {
+        const res: VerificationResult = await verifyPuzzle(p, { timeoutMs: 2000 });
+        if (res.status !== 'complete') throw new Error('Catalog verification incomplete');
+        p.minDistance = res.minDistance;
+        p.verificationStatus = res.status;
+        p.version = res.version;
       }
+      puzzles = candidate;
     })();
   }
+  puzzles = candidate;
 }
 export async function loadCatalog() {
   const response = await fetch('/puzzles.json', {cache:'no-store'});

@@ -2,6 +2,18 @@
 
 A mobile-first React + TypeScript + Vite game with an Express/Postgres unlock service for the dynamic staging deployment. It lives alongside the existing Dobble project; run commands from this directory. The game has no child accounts, analytics, external fonts, or image service.
 
+## Release 1.0.1 — merged-branch corrections (2026-10-27)
+
+Staging artifact: `31e7c7b4aebb255555d5a619217232a318d4623f`, deployed successfully on 2026-10-27 (deployment `7838b392-b9ac-4175-ae22-f4e0384a821b`). The user subsequently authorized committing and pushing the source corrections to main. This staging artifact was built before that source commit, so `/release.json` records its original base revision, `sourceDirty: true`, and an exact source digest.
+
+The release restores production compilation after adding the five difficulty types. Russian, Hebrew, and English source copy now includes all five labels; filters wrap at phone widths. The catalog still has the same 40 authored puzzles and 12 free IDs. Trivial and Very hard currently have no assigned puzzles.
+
+Offline generators now store the false starting occupancy and title directly in `Puzzle`, keep deterministic IDs for a seed/settings pair, and include every verified final equality. The verifier checks all legal true equalities rather than only the seed answer, rejects shorter solutions, deduplicates final boards, and reports bounded or timed-out searches as incomplete. Explicit catalog verification can be awaited and refuses to publish an incomplete batch. Authored entries no longer claim exhaustive minimum-distance verification without an audit.
+
+Supported generator requests use maximum operand widths of one or two digits and one or two moves. Horizontal requests support two operands; the legacy `generateVertical` helper produces addition candidates with two to four addends and explicitly returns `layout: 'horizontal'`. Unsupported settings reject, and exhausted searches return `null`. These helpers are offline preparation only: automatic practice, playable vertical layouts, calibrated five-level puzzle assignments, and live payments are not part of this static release.
+
+Validation: `npm test`, `npm run build`, and the catalog/general/mobile/language/access/parent/controls/PWA/difficulty/soft-launch browser suites against the production preview. The generator regressions replay verified paths through gameplay, exercise hints and catalog loading, detect hidden shortcuts, compare with an independent one-move reference, and cover seeds and resource limits. `/release.json` identifies the deployed version and source commit.
+
 ## Run
 
 Requires Node.js 22.13+.

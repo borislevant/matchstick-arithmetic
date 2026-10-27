@@ -1,87 +1,77 @@
-import { type Puzzle, type BoardState, type Move, layout, initialBoard, decode, applyMove, trueEquation } from './engine';
+import { type Puzzle, type BoardState, type Move, layout, initialBoard, decode, applyMove, trueEquation, compatibleSlots } from './engine';
 
 export type VerificationStatus = 'complete' | 'incomplete' | 'unsupported';
 export type VerificationResult = {
   status: VerificationStatus;
-  minDistance?: number; // minimal moves found to reach any accepted solution
-  solutions: Move[][]; // list of move sequences (each sequence is array of Move)
+  minDistance?: number;
+  // One shortest legal path per distinct final board, rather than move-order permutations.
+  solutions: Move[][];
+  equations: string[];
   timeMs: number;
-  reason?: string; // optional human-friendly note (e.g., 'timeout')
+  reason?: string;
+  version: 1;
 };
 
-function boardKey(board: BoardState) {
-  return board.map(r => r.map(v => (v ? '1' : '0')).join('')).join('|');
-}
+const boardKey = (board: BoardState) => board.map(row => row.map(Number).join('')).join('|');
 
-// BFS enumerator for legal moves up to maxDepth. Returns all solution paths found within depth.
-export async function verifyPuzzle(puzzle: Puzzle, options?: { timeoutMs?: number; startBoard?: BoardState }): Promise<VerificationResult> {
-  const startTime = Date.now();
-  const timeoutMs = options?.timeoutMs ?? 5000;
+// Offline bounded reference search. A seed answer must not hide alternative equalities.
+export async function verifyPuzzle(puzzle: Puzzle, options: { timeoutMs?: number; startBoard?: BoardState; maxStates?: number } = {}): Promise<VerificationResult> {
+  const startTime = performance.now();
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const maxStates = options.maxStates ?? 50000;
   const glyphs = puzzle.glyphs;
   const slots = layout(glyphs).slots;
-  const start = options?.startBoard ?? initialBoard(puzzle);
-
-  const maxDepth = puzzle.movesAllowed;
+  const start = options.startBoard ?? initialBoard(puzzle);
   const solutions: Move[][] = [];
-  let minFound: number | undefined = undefined;
+  const equations: string[] = [];
+  const result = (status: VerificationStatus, reason?: string, minDistance?: number): VerificationResult => ({
+    status, solutions, equations, timeMs: performance.now() - startTime, version: 1, reason,
+    ...(minDistance === undefined ? {} : { minDistance }),
+  });
+  if (![1, 2].includes(puzzle.movesAllowed) || glyphs.length > 24 ||
+      !Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 10000 || !Number.isInteger(maxStates) || maxStates < 1 || maxStates > 50000 ||
+      start.length !== glyphs.length || start.some((row, i) => row.length !== glyphs[i].initialSegments.length || row.some(value => typeof value !== 'boolean'))) {
+    return result('unsupported', 'unsupported-search-settings');
+  }
 
-  const visited = new Set<string>();
   type Node = { board: BoardState; path: Move[] };
   const queue: Node[] = [{ board: start, path: [] }];
-  visited.add(boardKey(start));
+  const visited = new Set([boardKey(start)]);
+  const destinations = slots.map(from => slots.filter(to => compatibleSlots(from, to)));
+  let minFound: number | undefined;
 
-  while (queue.length) {
-    if (Date.now() - startTime > timeoutMs) return { status: 'unsupported', solutions, timeMs: Date.now() - startTime, reason: 'timeout' };
-    const node = queue.shift()!;
+  for (let index = 0; index < queue.length; index++) {
+    if (performance.now() - startTime >= timeoutMs) return result('incomplete', 'timeout');
+    const node = queue[index];
     const depth = node.path.length;
-
-    // Check for solution at this node (only accept concrete acceptedSolutions via decode)
-    const expr = decode(glyphs, node.board);
-    if (expr !== null) {
-      // engine.checkBoard uses acceptedSolutions to decide solved; here we accept any true accepted solution
-      if (puzzle.acceptedSolutions.includes('*')) {
-        if (trueEquation(expr)) {
-          // wildcard but must still be true equation
-          if (minFound === undefined || depth < minFound) minFound = depth;
-          if (depth <= maxDepth) solutions.push([...node.path]);
-        }
-      } else if (puzzle.acceptedSolutions.includes(expr)) {
-        if (minFound === undefined || depth < minFound) minFound = depth;
-        if (depth <= maxDepth) solutions.push([...node.path]);
-      }
+    const expression = decode(glyphs, node.board);
+    if (expression !== null && trueEquation(expression)) {
+      minFound ??= depth;
+      solutions.push(node.path);
+      equations.push(expression);
+      if (depth < puzzle.movesAllowed) return result('incomplete', 'minDistance-mismatch', depth);
     }
+    if (depth >= puzzle.movesAllowed) continue;
 
-    // If we've reached the max search depth, don't expand
-    if (depth >= maxDepth) continue;
-
-    // Enumerate all possible relocations: from occupied -> empty compatible slots
-    for (const fromSlot of slots) {
-      if (!node.board[fromSlot.glyph]?.[fromSlot.segment]) continue;
-      for (const toSlot of slots) {
-        if (node.board[toSlot.glyph]?.[toSlot.segment]) continue;
-        // quick orientation/length check
-        if (fromSlot.length !== toSlot.length) continue;
-        // angles must match modulo 180
-        if ((((fromSlot.angle - toSlot.angle) % 180) + 180) % 180 !== 0) continue;
-        const move: Move = { from: { glyph: fromSlot.glyph, segment: fromSlot.segment }, to: { glyph: toSlot.glyph, segment: toSlot.segment } };
+    for (let sourceIndex = 0; sourceIndex < slots.length; sourceIndex++) {
+      const from = slots[sourceIndex];
+      if (!node.board[from.glyph][from.segment]) continue;
+      for (const to of destinations[sourceIndex]) {
+        if (performance.now() - startTime >= timeoutMs) return result('incomplete', 'timeout');
+        if (node.board[to.glyph][to.segment]) continue;
+        const move: Move = { from: { glyph: from.glyph, segment: from.segment }, to: { glyph: to.glyph, segment: to.segment } };
         const next = applyMove(node.board, move, glyphs);
         if (!next) continue;
         const key = boardKey(next);
         if (visited.has(key)) continue;
+        if (visited.size >= maxStates) return result('incomplete', 'state-limit');
         visited.add(key);
         queue.push({ board: next, path: [...node.path, move] });
       }
     }
   }
-
-  const timeMs = Date.now() - startTime;
-  // If no solutions found within maxDepth, mark incomplete
-  if (solutions.length === 0) return { status: 'incomplete', minDistance: minFound, solutions, timeMs, reason: minFound === undefined ? 'no-solution-within-depth' : undefined };
-
-  // If minimal distance differs from puzzle.movesAllowed, it's an incomplete verification (shortcut exists)
-  if (minFound !== undefined && minFound !== puzzle.movesAllowed) return { status: 'incomplete', minDistance: minFound, solutions, timeMs, reason: 'minDistance-mismatch' };
-
-  return { status: 'complete', minDistance: minFound, solutions, timeMs };
+  if (minFound === undefined) return result('incomplete', 'no-solution-within-depth');
+  return result('complete', undefined, minFound);
 }
 
 export default verifyPuzzle;

@@ -1,5 +1,5 @@
-import { type Puzzle, type Glyph, DIGITS, bits, encodeSolution, layout, applyMove, trueEquation, decode } from './engine';
-import { verticalSpecToExpression, verticalSpecToGlyphs, VerticalSpec } from './vertical';
+import { type Puzzle, type Glyph, DIGITS, bits, encodeSolution, layout, applyMove, trueEquation, evaluate, decode } from './engine';
+import { verticalSpecToExpression, type VerticalSpec } from './vertical';
 import verifyPuzzle from './verifier';
 
 type RNG = { next: () => number };
@@ -9,12 +9,10 @@ function makeRng(seed = 1): RNG {
 }
 function rnd(rng: RNG, n: number) { return rng.next() % n; }
 
-export type VerticalGeneratorOptions = { seed?: number; digits?: number; operands?: number; movesAllowed?: 1 | 2; maxAttempts?: number };
+export type VerticalGeneratorOptions = { seed?: number; digits?: number; operands?: number; movesAllowed?: 1 | 2; maxAttempts?: number; timeoutMs?: number };
 
 // Build addends by choosing random digits per column and computing result with carries
 function buildVerticalAddends(rng: RNG, digits: number, operands: number): VerticalSpec {
-  // currently support 2 operands only
-  operands = Math.max(2, Math.min(operands, 4));
   const addendDigits: number[][] = Array.from({ length: operands }, () => Array(digits).fill(0));
   // fill digits from least significant (0) to most
   for (let col = 0; col < digits; col++) {
@@ -45,7 +43,7 @@ function buildVerticalAddends(rng: RNG, digits: number, operands: number): Verti
 }
 
 // Try moving `moves` sticks on the solution board to produce a readable but incorrect start.
-function scrambleSolutionToStart(solutionExpr: string, moves: number, rng: RNG) {
+function scrambleSolutionToStart(solutionExpr: string, moves: number, rng: RNG, deadline: number) {
   const glyphs = (function exprToGlyphs(expr: string): Glyph[] {
     const g: Glyph[] = [];
     for (const ch of expr) {
@@ -62,7 +60,7 @@ function scrambleSolutionToStart(solutionExpr: string, moves: number, rng: RNG) 
   let board = solutionBoard.map(row => [...row]);
   const slots = layout(glyphs).slots;
 
-  for (let attempt = 0; attempt < 1000; attempt++) {
+  for (let attempt = 0; attempt < 1000 && performance.now() < deadline; attempt++) {
     board = solutionBoard.map(row => [...row]);
     let ok = true;
     for (let m = 0; m < moves; m++) {
@@ -80,77 +78,46 @@ function scrambleSolutionToStart(solutionExpr: string, moves: number, rng: RNG) 
     }
     if (!ok) continue;
     const decoded = decode(glyphs, board);
-    if (decoded && !trueEquation(decoded)) return { glyphs, startBoard: board };
-  }
-  // deterministic search
-  const glyphsLocal = glyphs;
-  const solutionBoardLocal = solutionBoard;
-  const slotsLocal = layout(glyphsLocal).slots;
-  const occupied = slotsLocal.filter(s => solutionBoardLocal[s.glyph]?.[s.segment]);
-  const empty = slotsLocal.filter(s => !solutionBoardLocal[s.glyph]?.[s.segment]);
-  if (moves === 1) {
-    for (const from of occupied) {
-      for (const to of empty) {
-        if (from.length !== to.length) continue;
-        if ((((from.angle - to.angle) % 180) + 180) % 180 !== 0) continue;
-        const mv = { from: { glyph: from.glyph, segment: from.segment }, to: { glyph: to.glyph, segment: to.segment } };
-        const next = applyMove(solutionBoardLocal.map(r => [...r]), mv, glyphsLocal as Glyph[]);
-        if (!next) continue;
-        const decoded = decode(glyphsLocal, next);
-        if (decoded && !trueEquation(decoded)) return { glyphs: glyphsLocal, startBoard: next };
-      }
-    }
-  }
-  if (moves === 2) {
-    for (const from1 of occupied) {
-      for (const to1 of empty) {
-        if (from1.length !== to1.length) continue;
-        if ((((from1.angle - to1.angle) % 180) + 180) % 180 !== 0) continue;
-        const mv1 = { from: { glyph: from1.glyph, segment: from1.segment }, to: { glyph: to1.glyph, segment: to1.segment } };
-        const b1 = applyMove(solutionBoardLocal.map(r => [...r]), mv1, glyphsLocal as Glyph[]);
-        if (!b1) continue;
-        const occupied2 = slotsLocal.filter(s => b1[s.glyph]?.[s.segment]);
-        const empty2 = slotsLocal.filter(s => !b1[s.glyph]?.[s.segment]);
-        for (const from2 of occupied2) {
-          for (const to2 of empty2) {
-            if (from2.length !== to2.length) continue;
-            if ((((from2.angle - to2.angle) % 180) + 180) % 180 !== 0) continue;
-            const mv2 = { from: { glyph: from2.glyph, segment: from2.segment }, to: { glyph: to2.glyph, segment: to2.segment } };
-            const next = applyMove(b1.map(r=>[...r]), mv2, glyphsLocal as Glyph[]);
-            if (!next) continue;
-            const decoded = decode(glyphsLocal, next);
-            if (decoded && !trueEquation(decoded)) return { glyphs: glyphsLocal, startBoard: next };
-          }
-        }
-      }
-    }
+    if (decoded && decoded.split('=').length === 2 && decoded.split('=').every(side => evaluate(side) !== null) && !trueEquation(decoded)) return { glyphs, startBoard: board };
   }
   return null;
 }
 
+// Legacy name: generates addition content on the existing horizontal board.
+// A playable column layout is not implemented or exposed in this release.
 export default async function generateVertical(options: VerticalGeneratorOptions = {}) {
-  const rng = makeRng(options.seed ?? Date.now());
+  const seed = options.seed ?? 1;
+  const rng = makeRng(seed);
   const digits = options.digits ?? 2;
   const operands = options.operands ?? 2;
   const movesAllowed = options.movesAllowed ?? 1 as 1 | 2;
   const maxAttempts = options.maxAttempts ?? 200;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  if (!Number.isInteger(digits) || digits < 1 || digits > 2 || !Number.isInteger(operands) || operands < 2 || operands > 4 ||
+      ![1, 2].includes(movesAllowed) || !Number.isInteger(maxAttempts) || maxAttempts < 0 || maxAttempts > 200 ||
+      !Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 10000 || !Number.isSafeInteger(seed)) {
+    throw new RangeError('Supported addition settings: 1–2 digits, 2–4 addends, 1–2 moves, up to 200 attempts and 10 seconds');
+  }
+  const deadline = performance.now() + timeoutMs;
+  for (let attempt = 0; attempt < maxAttempts && performance.now() < deadline; attempt++) {
     const spec = buildVerticalAddends(rng, digits, operands);
     const solution = verticalSpecToExpression(spec);
     // scramble
-    const scrambled = scrambleSolutionToStart(solution, movesAllowed, rng);
+    const scrambled = scrambleSolutionToStart(solution, movesAllowed, rng, deadline);
     if (!scrambled) continue;
     const { glyphs, startBoard } = scrambled;
 
-    const id = `vgen-${Date.now()}-${attempt}`;
-    const title = solution;
-    const p: Puzzle = { id, title, difficulty: 'easy', pack: 'start', movesAllowed, glyphs, acceptedSolutions: [solution], minDistance: movesAllowed, verificationStatus: 'unsupported', version: 1 } as Puzzle;
+    const id = `addition-v1-${seed}-${digits}-${operands}-${movesAllowed}-${attempt}`;
+    const title = decode(glyphs, startBoard)!;
+    const p: Puzzle = { id, title, difficulty: 'easy', pack: 'start', movesAllowed, glyphs: glyphs.map((glyph, i) => ({...glyph, initialSegments: [...startBoard[i]]})), acceptedSolutions: [solution], verificationStatus: 'unsupported', version: 1 } as Puzzle;
 
-    const res = await verifyPuzzle(p, { timeoutMs: 3000, startBoard });
+    const res = await verifyPuzzle(p, { timeoutMs: Math.min(2000, Math.max(0, deadline - performance.now())) });
     if (res.status === 'complete' && res.minDistance === movesAllowed) {
+      p.minDistance = res.minDistance;
       p.verificationStatus = 'complete';
-      return { puzzle: p, startBoard, solution, attempts: attempt + 1 };
+      p.acceptedSolutions = res.equations;
+      return { puzzle: p, startBoard, solution, attempts: attempt + 1, layout: 'horizontal' as const };
     }
   }
   return null;

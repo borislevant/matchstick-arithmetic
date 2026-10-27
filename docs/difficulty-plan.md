@@ -8,7 +8,7 @@ Create a clear learning progression from Trivial to Very hard. Increase difficul
 
 The end goal is automatic generation of new, verified puzzles for a requested difficulty and supported arithmetic format. Manual selection is useful for the initial learning catalog, but must not remain a requirement for every generated practice puzzle.
 
-Preserve the existing React application, seven-segment arithmetic, Russian/Hebrew interface, and physical move rules. This PR changes planning documentation only; application implementation and deployment belong to separate work.
+Preserve the existing React application, seven-segment arithmetic, Russian/Hebrew interface, and physical move rules. The original planning change was documentation only. The merged implementation and its release corrections are described below; phase completion still requires each completion gate.
 
 ## 2. Baseline and implementation audit
 
@@ -143,3 +143,10 @@ This plan authorizes no application implementation, catalog publication, merging
 Open decisions to resolve in the relevant phase: performance budgets by device; final calibrated level thresholds; initial supported settings matrix; vertical multiplication notation; and whether any larger templates require offline precomputation. Long division and other deferred notation are not prerequisites for automatic generation of supported puzzles.
 
 Existing staging reference: https://staging-matchstick-arithmetic-levant.xhostd.app. This planning update does not change or revalidate that deployment.
+
+
+## Release implementation status — 2026-10-27
+
+Version 1.0.1 contains five translated filter labels, bounded offline generation for supported horizontal settings, corrected initial occupancy, deterministic seed IDs, and verification against all reachable true equalities. Regression checks include replay through the game and an independent one-move reference. The original 40-puzzle catalog, access, and progress remain in place; its exhaustive alternative-answer audit is still pending and its entries do not claim complete minimum-distance verification.
+
+The function named `generateVertical` currently generates addition content on a horizontal board and declares that layout explicitly. Column geometry/interaction, calibrated new levels, multiple-operand mixed horizontal templates, automatic practice, cancellable workers, and wider templates remain pending. Phases 0–3 are not considered complete solely because their prototype commits are merged. No generated candidate is automatically added to the published catalog.

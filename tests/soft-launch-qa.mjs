@@ -66,7 +66,8 @@ const assertHealthy=async(page,errors,label)=>{
   assert.equal((await page.evaluate(()=>JSON.parse(localStorage.getItem('matchstick-arithmetic-v1')))).unlockCode,'QA-MOCK-CODE');
 
   // Re-lock locally to exercise the Russian payment-failure state behind the saved PIN.
-  await page.evaluate(()=>{const key='matchstick-arithmetic-v1',value=JSON.parse(localStorage.getItem(key));value.unlocked=false;delete value.unlockCode;localStorage.setItem(key,JSON.stringify(value));});
+  await page.evaluate(()=>{const key='matchstick-arithmetic-v1',value=JSON.parse(localStorage.getItem(key));value.unlocked=false;delete value.unlockCode;localStorage.setItem(key,JSON.stringify(value));window.dispatchEvent(new StorageEvent('storage',{key,newValue:JSON.stringify(value)}));});
+  await page.waitForSelector('.access-gate');
   await page.reload();await page.waitForSelector('.access-gate');
   await page.getByRole('button',{name:'Разблокировать',exact:true}).tap();
   await page.getByLabel('Родительский PIN',{exact:true}).fill('2468');
